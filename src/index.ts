@@ -189,13 +189,29 @@ async function handleQuickAction(
     "🛍️ ካታሎግ",
     "ካታሎግ",
   ];
-  const cartLabels = ["my cart", "🛒 my cart", "🛒 ጋሪዬ", "ጋሪዬ"];
+  const cartLabels = [
+    "my cart",
+    "🛒 my cart",
+    "🛒 ጋሪዬ",
+    "ጋሪዬ",
+    "show my cart",
+    "show cart",
+    "view cart",
+    "check my cart",
+    "what about my cart",
+    "what about the cart",
+    "cart please",
+  ];
   const orderLabels = [
     "my orders",
     "📦 my orders",
     "📦 ትዕዛዜቼ",
     "orders",
     "ትዕዛዜቼ",
+    "where is my order",
+    "check my order",
+    "order status",
+    "track my order",
   ];
   const sellerLabels = [
     "ask seller",
@@ -213,6 +229,39 @@ async function handleQuickAction(
     "ቋንቋ",
   ];
   const homeLabels = ["start", "home", "🏠 start", "🏠 መነሻ", "መነሻ"];
+  const greetingLabels = [
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "hey there",
+    "hello there",
+    "how are you",
+    "how are you doing",
+    "what's up",
+    "whats up",
+    "what bout my cart",
+    "what about my cart",
+    "thanks",
+    "thank you",
+    "help",
+    "can you help",
+    "yo",
+  ];
+
+  if (greetingLabels.includes(value)) {
+    await ctx.reply(
+      t(
+        session,
+        "Hi! I’m here to help with shopping, your cart, or orders. 😊",
+        "ሰላም! በግብይት፣ ጋሪዎ ወይም ትዕዛዜዎ ላይ እርዳዎታለሁ 😊",
+      ),
+      mainMenuKeyboard(session),
+    );
+    return true;
+  }
 
   if (menuLabels.includes(value)) {
     await showCategoryMenu(ctx, session);
@@ -1125,6 +1174,30 @@ bot.on("text", async (ctx) => {
     );
   }
 
+  const casualGreeting = /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|can\s+you\s+help|yo)\b/i;
+  if (casualGreeting.test(normalized)) {
+    await ctx.reply(
+      t(
+        session,
+        "Hi! I can help with products, your cart, or your orders. 😊 What are you looking for?",
+        "ሰላም! ምርቶችን፣ ጋሪዎን ወይም ትዕዛዜዎን ማርዶ እችላለሁ 😊 ምን ይፈልጋሉ?",
+      ),
+      mainMenuKeyboard(session),
+    );
+    return;
+  }
+
+  const cartLookUp = /(?:what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|show\s+my\s+cart|view\s+cart|check\s+my\s+cart|my\s+cart|cart\s+please)/i;
+  if (cartLookUp.test(normalized)) {
+    try {
+      await showCartText(ctx, session);
+    } catch (err) {
+      console.error(`Failed to show cart for chat ${chatId}:`, err);
+      return ctx.reply(friendlyErrorText(session));
+    }
+    return;
+  }
+
   // Important: free-form customer text must be interpreted by the AI tool-calling
   // layer. We intentionally avoid regex-driven guesses here so responses are based
   // on the actual message and the tool schema instead of a hard-coded shortcut.
@@ -1137,7 +1210,23 @@ bot.on("text", async (ctx) => {
     await persist(chatId, session);
 
     if (result.action === "reply") {
-      return ctx.reply(result.text);
+      const cleanText = (result.text || "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!cleanText) {
+        return ctx.reply(
+          t(
+            session,
+            "Hi! I can help with products, your cart, or your orders. 😊 What are you looking for?",
+            "ሰላም! ምርቶችን፣ ጋሪዎን ወይም ትዕዛዜዎን ማርዶ እችላለሁ 😊 ምን ይፈልጋሉ?",
+          ),
+          mainMenuKeyboard(session),
+        );
+      }
+
+      return ctx.reply(cleanText);
     }
 
     if (result.action === "show_categories") {

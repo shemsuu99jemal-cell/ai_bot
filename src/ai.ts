@@ -204,6 +204,14 @@ function trimHistory(history: any[]): any[] {
 function parseInlineToolAction(text: string): AiResult | null {
   if (!text) return null;
 
+  const clean = text.replace(/<[^>]+>/g, "").trim();
+  if (
+    !clean ||
+    /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|i\s+need\s+help|can\s+you\s+help|what\s+can\s+you\s+do|ya|yo)\b/i.test(clean)
+  ) {
+    return null;
+  }
+
   const match =
     text.match(/<function\s*=\s*([a-z_]+)\s*>/i) ||
     text.match(/function\s*=\s*([a-z_]+)/i);
