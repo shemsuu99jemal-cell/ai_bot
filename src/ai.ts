@@ -106,6 +106,15 @@ const tools: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "show_customer_orders",
+      description:
+        "Use when the customer asks where their order is, wants an order status, or asks to see their recent orders. Shows exact order history/status without guessing.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "remove_from_cart",
       description:
         "Remove one item from the cart by product_id or clear the whole cart when all=true.",
@@ -162,6 +171,8 @@ function systemPrompt(language: "en" | "am", customerName?: string): string {
 - If the customer wants to remove something from the cart, use remove_from_cart.
 - After add_to_cart, you may suggest ONE relevant accessory via search_products — skip if nothing fits, never invent products.
 - Customer confirms they're done → checkout. Never call it unprompted.
+- If the customer asks where their order is, wants order status, asks to track an order, or asks to see recent orders → show_customer_orders. This is a high-priority intent and must not be confused with cart actions.
+- Never call view_cart when the customer is asking about an order status, order location, or tracking. view_cart is only for cart review.
 - Anything uncertain (refunds, warranty, delivery time, discounts) → ask_seller, never guess.
 - Ambiguous request → ask one short clarifying question (color/budget/new-used).
 
@@ -202,6 +213,10 @@ function parseInlineToolAction(text: string): AiResult | null {
 
   if (toolName === "show_categories") {
     return { action: "show_categories" };
+  }
+
+  if (toolName === "show_customer_orders") {
+    return { action: "show_customer_orders" };
   }
 
   if (toolName === "checkout") {
@@ -387,6 +402,13 @@ export async function handleMessage(
             tool_call_id: call.id,
             content: cartSummary(session.cart),
           } as any);
+        } else if (call.function.name === "show_customer_orders") {
+          session.history.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify({ ok: true }),
+          } as any);
+          pendingAction = { action: "show_customer_orders" };
         } else if (call.function.name === "remove_from_cart") {
           if (args.all) {
             session.cart = [];

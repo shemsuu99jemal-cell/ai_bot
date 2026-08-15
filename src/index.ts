@@ -249,6 +249,16 @@ async function handleQuickAction(
   return false;
 }
 
+const ORDER_STATUS_RE_EN =
+  /(?:where(?:'s| is)?\s+(?:my|the)?\s*order|check\s+(?:my\s+)?order|order\s+status|track\s+my\s+order|status\s+of\s+my\s+order|what'?s\s+the\s+status\s+of\s+my\s+order|where\s+is\s+my\s+order|my\s+orders?)/i;
+const ORDER_STATUS_RE_AM =
+  /(የእኔ\s*ትዕዛዝ|ትዕዛዜ\s*የት\s*ነው|ትዕዛዝ\s*እንዴት\s*ነው|የእኔ\s*እዚህ\s*ነው|እቅዴ\s*እንዴት\s*ነው|ስለ\s*ትዕዛዜ|ትዕዛዜ\s*አለ)/i;
+
+function isOrderStatusIntent(text: string): boolean {
+  const value = text.trim();
+  return ORDER_STATUS_RE_EN.test(value) || ORDER_STATUS_RE_AM.test(value);
+}
+
 function friendlyErrorText(session: Session): string {
   return t(
     session,
@@ -266,18 +276,6 @@ function statusLabel(session: Session, status: OrderStatus): string {
   };
   const [emoji, en, am] = map[status];
   return `${emoji} ${t(session, en, am)}`;
-}
-
-// Deterministic browse-intent detection — catches the most common phrasings
-// WITHOUT calling the AI at all, so this path costs zero tokens and responds
-// instantly. Anything phrased differently still reaches the AI's
-// show_categories tool as a fallback.
-const BROWSE_RE_EN =
-  /^(what do you have|show me (everything|products|items|phones|categories)|menu|catalog|categories|what'?s available|browse)\b/i;
-const BROWSE_RE_AM = /(ምን\s*አለ|ካታሎግ|ምርቶች|ዝርዝር|ሜኑ)/;
-
-function isBrowseIntent(text: string): boolean {
-  return BROWSE_RE_EN.test(text.trim()) || BROWSE_RE_AM.test(text);
 }
 
 // ---- category / product browsing ----
@@ -1004,6 +1002,26 @@ bot.on("text", async (ctx) => {
     }
   }
 
+  if (isOrderStatusIntent(text)) {
+    try {
+      await showCustomerOrders(ctx, session);
+    } catch (err) {
+      console.error(`Failed to show order status for chat ${chatId}:`, err);
+      return ctx.reply(friendlyErrorText(session));
+    }
+    return;
+  }
+
+  if (isOrderStatusIntent(text)) {
+    try {
+      await showCustomerOrders(ctx, session);
+    } catch (err) {
+      console.error(`Failed to show order status for chat ${chatId}:`, err);
+      return ctx.reply(friendlyErrorText(session));
+    }
+    return;
+  }
+
   if (await handleQuickAction(ctx, session, text)) {
     return;
   }
@@ -1107,44 +1125,9 @@ bot.on("text", async (ctx) => {
     );
   }
 
-  // deterministic browse detection — zero AI calls, instant response
-  if (isBrowseIntent(text)) {
-    try {
-      await showCategoryMenu(ctx, session);
-    } catch (err) {
-      console.error(`Failed to show category menu for chat ${chatId}:`, err);
-      return ctx.reply(friendlyErrorText(session));
-    }
-    return;
-  }
-
-  const searchMaybe = normalized.replace(/^\s*search\s+/i, "").trim();
-  if (
-    searchMaybe.length >= 2 &&
-    !/[?!.]$/.test(searchMaybe) &&
-    !/[\u1200-\u137F]/.test(searchMaybe)
-  ) {
-    const likelyProductSearch =
-      searchMaybe.split(/\s+/).filter(Boolean).length >= 2 ||
-      /iphone|samsung|phone|charger|headphones|earbuds|watch|tablet|accessory|case|cable/i.test(
-        searchMaybe,
-      );
-    if (likelyProductSearch) {
-      try {
-        await showProductResults(
-          ctx,
-          session,
-          searchMaybe,
-          t(session, `Search results`, `የፍለጋ ውጤቶች`),
-        );
-      } catch (err) {
-        console.error(`Failed to search products for chat ${chatId}:`, err);
-        return ctx.reply(friendlyErrorText(session));
-      }
-      return;
-    }
-  }
-
+  // Important: free-form customer text must be interpreted by the AI tool-calling
+  // layer. We intentionally avoid regex-driven guesses here so responses are based
+  // on the actual message and the tool schema instead of a hard-coded shortcut.
   try {
     await ctx.sendChatAction("typing");
   } catch {}
@@ -1159,6 +1142,10 @@ bot.on("text", async (ctx) => {
 
     if (result.action === "show_categories") {
       return showCategoryMenu(ctx, session);
+    }
+
+    if (result.action === "show_customer_orders") {
+      return showCustomerOrders(ctx, session);
     }
 
     if (result.action === "ask_seller") {

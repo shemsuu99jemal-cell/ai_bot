@@ -65,4 +65,5 @@ export type AiResult =
   | { action: "reply"; text: string }
   | { action: "checkout" }
   | { action: "ask_seller"; question: string }
-  | { action: "show_categories" };
+  | { action: "show_categories" }
+  | { action: "show_customer_orders" };
