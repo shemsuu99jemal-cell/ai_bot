@@ -36,7 +36,7 @@ create table if not exists orders (
 create table if not exists order_items (
   id uuid primary key default gen_random_uuid(),
   order_id uuid references orders(id) on delete cascade,
-  product_id uuid references products(id),
+  product_id uuid references products(id) on delete cascade,
   product_name text not null,     -- snapshot, in case product is edited/deleted later
   unit_price numeric not null,    -- snapshot of price at order time
   quantity int not null

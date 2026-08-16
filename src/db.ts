@@ -128,6 +128,96 @@ export async function getRelatedProducts(
   return await tryQuery(null, true).catch(() => []);
 }
 
+// ---- product admin CRUD (seller only — gated in index.ts) ----
+
+export async function createProduct(data: {
+  name: string;
+  description?: string | null;
+  price: number;
+  stock: number;
+  category?: string | null;
+  colors?: string[] | null;
+}): Promise<Product> {
+  const { data: product, error } = await supabase
+    .from("products")
+    .insert({
+      name: data.name,
+      description: data.description || null,
+      price: data.price,
+      stock: data.stock,
+      category: data.category || null,
+      colors: data.colors && data.colors.length ? data.colors : null,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  categoriesCache = null; // a new category may have just been introduced
+  return product as Product;
+}
+
+export async function updateProduct(
+  productId: string,
+  updates: Partial<{
+    name: string;
+    description: string | null;
+    price: number;
+    stock: number;
+    category: string | null;
+    colors: string[] | null;
+  }>,
+): Promise<Product> {
+  const { data, error } = await supabase
+    .from("products")
+    .update(updates)
+    .eq("id", productId)
+    .select()
+    .single();
+  if (error) throw error;
+  categoriesCache = null;
+  return data as Product;
+}
+
+export async function deleteProduct(productId: string): Promise<void> {
+  const { error: orderItemsError } = await supabase
+    .from("order_items")
+    .delete()
+    .eq("product_id", productId);
+  if (orderItemsError) throw orderItemsError;
+
+  const { error } = await supabase
+    .from("products")
+    .delete()
+    .eq("id", productId);
+  if (error) throw error;
+  categoriesCache = null;
+}
+
+export async function listAllProducts(
+  page = 1,
+  pageSize = 8,
+): Promise<{ products: Product[]; total: number }> {
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+  const { data, error, count } = await supabase
+    .from("products")
+    .select("*", { count: "exact" })
+    .order("created_at", { ascending: false })
+    .range(from, to);
+  if (error) throw error;
+  return { products: (data || []) as Product[], total: count || 0 };
+}
+
+export async function listRecentOrders(limit = 10): Promise<Order[]> {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+  return (data || []) as Order[];
+}
+
 // ---- orders ----
 
 export async function createOrderFromCart(

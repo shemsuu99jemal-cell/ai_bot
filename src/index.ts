@@ -12,10 +12,15 @@ import {
   getRelatedProducts,
   searchProducts,
   getCustomerOrders,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  listAllProducts,
+  listRecentOrders,
 } from "./db";
 import { loadSession, saveSession } from "./db";
 import { runEscalationCycle, startEscalationJob } from "./cron";
-import type { Session, OrderStatus } from "./types";
+import type { Session, OrderStatus, Product } from "./types";
 
 const REQUIRED_ENV = [
   "BOT_TOKEN",
@@ -66,6 +71,357 @@ async function persist(chatId: number, session: Session): Promise<void> {
     console.error(`Failed to persist session for chat ${chatId}:`, err);
   }
 }
+
+// ==========================================================================
+// ---- admin: product CRUD (seller only, gated by isSeller everywhere) ----
+// ==========================================================================
+
+type AdminDraftField =
+  | "name"
+  | "description"
+  | "price"
+  | "stock"
+  | "category"
+  | "colors";
+
+interface AdminDraft {
+  mode: "create" | "edit";
+  productId?: string;
+  step: AdminDraftField | null;
+  name?: string;
+  description?: string | null;
+  price?: number;
+  stock?: number;
+  category?: string | null;
+  colors?: string[] | null;
+}
+
+const adminDrafts = new Map<number, AdminDraft>();
+const PRODUCTS_PAGE_SIZE = 8;
+
+function compactProductToken(value: string): string {
+  return value.replace(/-/g, "");
+}
+
+function restoreProductId(value: string): string {
+  if (!/^[0-9a-fA-F]{32}$/.test(value)) return value;
+  return [
+    value.slice(0, 8),
+    value.slice(8, 12),
+    value.slice(12, 16),
+    value.slice(16, 20),
+    value.slice(20),
+  ].join("-");
+}
+
+function sellerReplyKeyboard(): any {
+  return Markup.keyboard([
+    ["🏠 Start", "📦 Products"],
+    ["🧾 Orders", "➕ Add Product"],
+    ["🔄 Refresh", "📋 Menu"],
+  ])
+    .resize()
+    .oneTime(false);
+}
+
+async function showSellerDashboard(ctx: any): Promise<void> {
+  await ctx.reply(
+    "Seller Dashboard\n\nManage products, inventory, and recent orders.",
+    sellerReplyKeyboard(),
+  );
+}
+
+async function showAdminProductList(ctx: any, page = 1): Promise<void> {
+  const { products, total } = await listAllProducts(page, PRODUCTS_PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(total / PRODUCTS_PAGE_SIZE));
+
+  if (products.length === 0) {
+    return ctx.reply(
+      "No products yet. Tap below to add your first one.",
+      sellerReplyKeyboard(),
+    );
+  }
+
+  const rows = products.map((p) => [
+    Markup.button.callback(
+      `${p.stock === 0 ? "⚠️ " : ""}${p.name} — ${p.price} ETB (${p.stock} in stock)`,
+      `admin_edit_${compactProductToken(p.id)}`,
+    ),
+  ]);
+
+  const navRow: any[] = [];
+  if (page > 1)
+    navRow.push(Markup.button.callback("⬅️ Prev", `admin_page_${page - 1}`));
+  navRow.push(Markup.button.callback(`${page}/${totalPages}`, "noop"));
+  if (page < totalPages)
+    navRow.push(Markup.button.callback("Next ➡️", `admin_page_${page + 1}`));
+  if (navRow.length) rows.push(navRow);
+
+  rows.push([
+    Markup.button.callback("➕ Add Product", "admin_add"),
+    Markup.button.callback("⬅️ Dashboard", "seller_dashboard"),
+  ]);
+
+  await ctx.reply(
+    `📦 Products (${total} total) — tap one to manage it`,
+    Markup.inlineKeyboard(rows),
+  );
+}
+
+async function showSellerOrders(ctx: any): Promise<void> {
+  const orders = await listRecentOrders(10);
+
+  if (orders.length === 0) {
+    return ctx.reply(
+      "No orders yet.",
+      sellerReplyKeyboard(),
+    );
+  }
+
+  const lines = orders.map((order) => {
+    const created = order.created_at
+      ? new Date(order.created_at).toLocaleDateString()
+      : "n/a";
+    return `#${String(order.id).slice(0, 8)} • ${order.customer_name || "Customer"} • ${order.total} ETB • ${order.status} • ${created}`;
+  });
+
+  await ctx.reply(
+    "🧾 Recent Orders\n\n" + lines.join("\n"),
+    sellerReplyKeyboard(),
+  );
+}
+
+function normalizeSellerActionText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\uFE0F/g, "")
+    .replace(/[^a-z0-9\s+]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function handleSellerKeyboardText(ctx: any, text: string): Promise<boolean> {
+  const value = normalizeSellerActionText(text);
+  if (!value) return false;
+
+  const actions: Record<string, () => Promise<void>> = {
+    start: () => showSellerDashboard(ctx),
+    menu: () => showSellerDashboard(ctx),
+    products: () => showAdminProductList(ctx, 1),
+    orders: () => showSellerOrders(ctx),
+    "add product": async () => {
+      adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
+      await ctx.reply(
+        "Let's add a new product. What's the product name?",
+        sellerReplyKeyboard(),
+      );
+    },
+    refresh: () => showSellerDashboard(ctx),
+  };
+
+  const handler = actions[value];
+  if (!handler) return false;
+  await handler();
+  return true;
+}
+
+function adminEditMenuText(draft: AdminDraft): string {
+  return (
+    `${draft.name}\n\n` +
+    `📝 ${draft.description || "No description"}\n` +
+    `💰 ${draft.price} ETB\n` +
+    `📦 Stock: ${draft.stock}\n` +
+    `🏷 Category: ${draft.category || "—"}\n` +
+    `🎨 Colors: ${draft.colors?.join(", ") || "—"}`
+  );
+}
+
+function adminEditMenuKeyboard(productId: string): any {
+  const safeId = compactProductToken(productId);
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("✏️ Name", `admin_field_name_${safeId}`),
+      Markup.button.callback(
+        "📝 Description",
+        `admin_field_description_${safeId}`,
+      ),
+    ],
+    [
+      Markup.button.callback("💰 Price", `admin_field_price_${safeId}`),
+      Markup.button.callback("📦 Stock", `admin_field_stock_${safeId}`),
+    ],
+    [
+      Markup.button.callback(
+        "🏷 Category",
+        `admin_field_category_${safeId}`,
+      ),
+      Markup.button.callback("🎨 Colors", `admin_field_colors_${safeId}`),
+    ],
+    [Markup.button.callback("🗑 Delete Product", `admin_delete_${safeId}`)],
+    [Markup.button.callback("✅ Done", "admin_done")],
+  ]);
+}
+
+async function finalizeNewProduct(ctx: any, draft: AdminDraft): Promise<void> {
+  const chatId = ctx.chat.id;
+  try {
+    const product = await createProduct({
+      name: draft.name!,
+      description: draft.description,
+      price: draft.price!,
+      stock: draft.stock!,
+      category: draft.category,
+      colors: draft.colors,
+    });
+    adminDrafts.delete(chatId);
+    await ctx.reply(
+      `✅ Added "${product.name}"`,
+      adminEditMenuKeyboard(product.id),
+    );
+  } catch (err) {
+    console.error("Failed to create product:", err);
+    await ctx.reply(
+      "Something went wrong creating that product — please try /addproduct again.",
+    );
+    adminDrafts.delete(chatId);
+  }
+}
+
+function refreshDraftFromProduct(product: Product): AdminDraft {
+  return {
+    mode: "edit",
+    productId: product.id,
+    step: null,
+    name: product.name,
+    description: product.description || null,
+    price: product.price,
+    stock: product.stock,
+    category: product.category || null,
+    colors: Array.isArray(product.colors)
+      ? product.colors
+      : product.color
+        ? [product.color]
+        : null,
+  };
+}
+
+async function handleAdminDraftText(
+  ctx: any,
+  draft: AdminDraft,
+  text: string,
+): Promise<void> {
+  const chatId = ctx.chat.id;
+  const skip = text.toLowerCase() === "/skip";
+
+  if (draft.mode === "create") {
+    switch (draft.step) {
+      case "name":
+        if (!text || skip)
+          return ctx.reply("Please send a product name (required).");
+        draft.name = text;
+        draft.step = "description";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply("Description? (or /skip)");
+      case "description":
+        draft.description = skip ? null : text;
+        draft.step = "price";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply("Price in ETB? (numbers only)");
+      case "price": {
+        const price = Number(text.replace(/[^\d.]/g, ""));
+        if (!price || Number.isNaN(price))
+          return ctx.reply("Please send a valid price, e.g. 15000");
+        draft.price = price;
+        draft.step = "stock";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply("Stock quantity?");
+      }
+      case "stock": {
+        const stock = Number(text.replace(/[^\d]/g, ""));
+        if (Number.isNaN(stock))
+          return ctx.reply("Please send a valid whole number, e.g. 10");
+        draft.stock = stock;
+        draft.step = "category";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply("Category? (e.g. Phones, Accessories — or /skip)");
+      }
+      case "category":
+        draft.category = skip ? null : text;
+        draft.step = "colors";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply(
+          "Colors, comma-separated? (e.g. Black, White — or /skip)",
+        );
+      case "colors":
+        draft.colors = skip
+          ? null
+          : text
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+        await finalizeNewProduct(ctx, draft);
+        return;
+    }
+    return;
+  }
+
+  // edit mode — one field at a time, saved immediately
+  if (draft.mode === "edit" && draft.productId) {
+    const updates: Record<string, any> = {};
+    switch (draft.step) {
+      case "name":
+        if (!text || skip) return ctx.reply("Name can't be empty.");
+        updates.name = text;
+        break;
+      case "description":
+        updates.description = skip ? null : text;
+        break;
+      case "price": {
+        const price = Number(text.replace(/[^\d.]/g, ""));
+        if (!price || Number.isNaN(price))
+          return ctx.reply("Please send a valid price.");
+        updates.price = price;
+        break;
+      }
+      case "stock": {
+        const stock = Number(text.replace(/[^\d]/g, ""));
+        if (Number.isNaN(stock))
+          return ctx.reply("Please send a valid whole number.");
+        updates.stock = stock;
+        break;
+      }
+      case "category":
+        updates.category = skip ? null : text;
+        break;
+      case "colors":
+        updates.colors = skip
+          ? null
+          : text
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+        break;
+      default:
+        return;
+    }
+
+    try {
+      const updated = await updateProduct(draft.productId, updates);
+      const refreshed = refreshDraftFromProduct(updated);
+      adminDrafts.set(chatId, refreshed);
+      await ctx.reply("Updated ✅");
+      await ctx.reply(
+        adminEditMenuText(refreshed),
+        adminEditMenuKeyboard(updated.id),
+      );
+    } catch (err) {
+      console.error("Failed to update product:", err);
+      await ctx.reply("Something went wrong saving that change.");
+    }
+  }
+}
+
+// ==========================================================================
 
 function t(session: Session, en: string, am: string): string {
   return session.language === "am" ? am : en;
@@ -354,11 +710,21 @@ async function showCategoryMenu(ctx: any, session: Session): Promise<void> {
 }
 
 bot.command("menu", async (ctx) => {
+  if (isSeller(ctx.from.id)) {
+    await showSellerDashboard(ctx);
+    return;
+  }
+
   const session = await getSession(ctx.chat.id);
   await sendMainMenu(ctx, session, t(session, "Shop menu", "የሱቅ ሜኑ"));
 });
 
 bot.command("start", async (ctx) => {
+  if (isSeller(ctx.from.id)) {
+    await showSellerDashboard(ctx);
+    return;
+  }
+
   const session = await getSession(ctx.chat.id);
   await sendMainMenu(ctx, session, t(session, "Main menu", "ዋና ሜኑ"));
 });
@@ -394,6 +760,19 @@ bot.command("cart", async (ctx) => {
   );
 });
 
+// ---- admin: product CRUD commands (seller only) ----
+
+bot.command("admin", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return;
+  await showAdminProductList(ctx, 1);
+});
+
+bot.command("addproduct", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return;
+  adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
+  await ctx.reply("Let's add a new product. What's the product name?");
+});
+
 async function showProductResults(
   ctx: any,
   session: Session,
@@ -412,7 +791,10 @@ async function showProductResults(
   }
 
   const rows = products.map((p: any) => [
-    Markup.button.callback(`${p.name} — ${p.price} ETB`, `prod_${p.id}`),
+    Markup.button.callback(
+      `${p.name} — ${p.price} ETB`,
+      `prod_${compactProductToken(p.id)}`,
+    ),
   ]);
   rows.push([
     Markup.button.callback(
@@ -463,7 +845,7 @@ async function showProductDetail(
       buttons.push([
         Markup.button.callback(
           `${color}${selectedColor === color ? " ✅" : ""}`,
-          `color_${product.id}_${index}`,
+          `color_${compactProductToken(product.id)}_${index}`,
         ),
       ]);
     }
@@ -475,7 +857,7 @@ async function showProductDetail(
   buttons.push([
     Markup.button.callback(
       t(session, "🛒 Add to cart", "🛒 ወደ ጋሪ ጨምር"),
-      `add_selected_${product.id}_${chosenIndex >= 0 ? chosenIndex : 0}`,
+      `add_selected_${compactProductToken(product.id)}_${chosenIndex >= 0 ? chosenIndex : 0}`,
     ),
   ]);
   buttons.push([
@@ -517,7 +899,10 @@ bot.action(/cat_(\d+)/, async (ctx) => {
   }
 
   const rows = products.map((p: any) => [
-    Markup.button.callback(`${p.name} — ${p.price} ETB`, `prod_${p.id}`),
+    Markup.button.callback(
+      `${p.name} — ${p.price} ETB`,
+      `prod_${compactProductToken(p.id)}`,
+    ),
   ]);
   rows.push([
     Markup.button.callback(
@@ -538,13 +923,13 @@ bot.action("back_categories", async (ctx) => {
 bot.action(/prod_(.+)/, async (ctx) => {
   const session = await getSession(ctx.chat!.id);
   await ctx.answerCbQuery();
-  return showProductDetail(ctx, session, ctx.match[1]);
+  return showProductDetail(ctx, session, restoreProductId(ctx.match[1]));
 });
 
 bot.action(/color_(.+)_(\d+)/, async (ctx) => {
   const session = await getSession(ctx.chat!.id);
   await ctx.answerCbQuery();
-  const productId = ctx.match[1];
+  const productId = restoreProductId(ctx.match[1]);
   const product = await getProduct(productId).catch(() => null);
   const availableColors = Array.isArray(product?.colors)
     ? product.colors.filter(Boolean)
@@ -560,7 +945,7 @@ bot.action(/add_selected_(.+)_(\d+)/, async (ctx) => {
   const session = await getSession(chatId);
   await ctx.answerCbQuery();
 
-  const productId = ctx.match[1];
+  const productId = restoreProductId(ctx.match[1]);
   const product = await getProduct(productId).catch(() => null);
   if (!product || product.stock < 1) {
     return ctx.reply(
@@ -620,7 +1005,7 @@ bot.action(/add_selected_(.+)_(\d+)/, async (ctx) => {
     buttons.push([
       Markup.button.callback(
         t(session, "✨ You may also like", "✨ እንዲሁም ይመልከቱ"),
-        `prod_${related[0].id}`,
+        `prod_${compactProductToken(related[0].id)}`,
       ),
     ]);
   }
@@ -664,7 +1049,7 @@ bot.action("view_cart", async (ctx) => {
     buttons.push([
       Markup.button.callback(
         t(session, `Remove ${item.name}`, `አስወግድ ${item.name}`),
-        `remove_cart_${item.product_id}`,
+        `remove_cart_${compactProductToken(item.product_id)}`,
       ),
     ]);
   });
@@ -687,7 +1072,7 @@ bot.action(/remove_cart_(.+)/, async (ctx) => {
   const chatId = ctx.chat!.id;
   const session = await getSession(chatId);
   await ctx.answerCbQuery();
-  const productId = ctx.match[1];
+  const productId = restoreProductId(ctx.match[1]);
   const before = session.cart.length;
   session.cart = session.cart.filter((item) => item.product_id !== productId);
   await persist(chatId, session);
@@ -748,7 +1133,7 @@ bot.action(/seller_q_(.+)/, async (ctx) => {
   const chatId = ctx.chat!.id;
   const session = await getSession(chatId);
   await ctx.answerCbQuery();
-  const productId = ctx.match[1];
+  const productId = restoreProductId(ctx.match[1]);
   const product = await getProduct(productId).catch(() => null);
   const productName = product ? product.name : "this item";
 
@@ -765,6 +1150,120 @@ bot.action(/seller_q_(.+)/, async (ctx) => {
     ),
   );
 });
+
+// ---- admin: product CRUD button handlers (seller only) ----
+
+bot.action("seller_dashboard", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerDashboard(ctx);
+});
+
+bot.action("seller_products", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showAdminProductList(ctx, 1);
+});
+
+bot.action("seller_orders", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerOrders(ctx);
+});
+
+bot.action("admin_add", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  adminDrafts.set(ctx.chat!.id, { mode: "create", step: "name" });
+  await ctx.reply("Let's add a new product. What's the product name?");
+});
+
+bot.action(/admin_page_(\d+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showAdminProductList(ctx, Number(ctx.match[1]));
+});
+
+bot.action(/admin_edit_(.+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const productId = restoreProductId(ctx.match[1]);
+  const product = await getProduct(productId).catch(() => null);
+  if (!product) return ctx.reply("That product no longer exists.");
+
+  const draft = refreshDraftFromProduct(product);
+  adminDrafts.set(ctx.chat!.id, draft);
+  await ctx.reply(adminEditMenuText(draft), adminEditMenuKeyboard(product.id));
+});
+
+bot.action(
+  /admin_field_(name|description|price|stock|category|colors)_(.+)/,
+  async (ctx) => {
+    if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+    await ctx.answerCbQuery();
+    const field = ctx.match[1] as AdminDraftField;
+    const productId = restoreProductId(ctx.match[2]);
+    const draft = adminDrafts.get(ctx.chat!.id);
+    if (!draft || draft.productId !== productId)
+      return ctx.reply("Session expired — tap /menu to start again.");
+
+    draft.step = field;
+    adminDrafts.set(ctx.chat!.id, draft);
+
+    const prompts: Record<AdminDraftField, string> = {
+      name: "Send the new product name.",
+      description: "Send the new description (or /skip to clear it).",
+      price: "Send the new price (numbers only, in ETB).",
+      stock: "Send the new stock quantity.",
+      category: "Send the new category (or /skip to clear it).",
+      colors: "Send the colors, comma-separated (or /skip to clear).",
+    };
+    await ctx.reply(prompts[field]);
+  },
+);
+
+bot.action(/^admin_delete_confirm_(.+)$/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const productId = restoreProductId(ctx.match[1]);
+  try {
+    await deleteProduct(productId);
+    adminDrafts.delete(ctx.chat!.id);
+    await ctx.reply("Product deleted ✅");
+    await showAdminProductList(ctx, 1);
+  } catch (err) {
+    console.error("Failed to delete product:", err);
+    await ctx.reply("Something went wrong deleting that product.");
+  }
+});
+
+bot.action(/admin_delete_(.+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  if (ctx.match[1].startsWith("confirm_")) return;
+  await ctx.answerCbQuery();
+  const productId = restoreProductId(ctx.match[1]);
+  await ctx.reply(
+    "Delete this product? This can't be undone.",
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "❌ Yes, delete",
+          `admin_delete_confirm_${compactProductToken(productId)}`,
+        ),
+      ],
+      [Markup.button.callback("Cancel", `admin_edit_${compactProductToken(productId)}`)],
+    ]),
+  );
+});
+
+bot.action("admin_done", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  adminDrafts.delete(ctx.chat!.id);
+  await ctx.reply("Done ✅");
+});
+
+bot.action("noop", async (ctx) => ctx.answerCbQuery());
 
 bot.action("do_checkout", async (ctx) => {
   const chatId = ctx.chat!.id;
@@ -879,6 +1378,11 @@ async function finalizeOrder(
 
 // ---- /start ----
 bot.start(async (ctx) => {
+  if (isSeller(ctx.from.id)) {
+    await showSellerDashboard(ctx);
+    return;
+  }
+
   await ctx.reply(
     "Welcome! Please choose your language / እባክዎ ቋንቋ ይምረጡ:",
     Markup.inlineKeyboard([
@@ -1030,14 +1534,19 @@ bot.on("text", async (ctx) => {
     );
   }
 
-  if (!session.language) {
-    return ctx.reply("Please tap /start first to choose a language.");
-  }
-
   const customerName = ctx.from.first_name || ctx.from.username || "Customer";
   const text = ctx.message.text;
 
   if (isSeller(ctx.from.id)) {
+    const sellerHandled = await handleSellerKeyboardText(ctx, text);
+    if (sellerHandled) return;
+
+    const draft = adminDrafts.get(chatId);
+    if (draft && draft.step) {
+      await handleAdminDraftText(ctx, draft, text.trim());
+      return;
+    }
+
     const pendingOrderId = pendingRejectReasonBySeller.get(ctx.from.id);
     if (pendingOrderId) {
       if (text.trim().toLowerCase() === "/cancel_reject") {
@@ -1049,6 +1558,10 @@ bot.on("text", async (ctx) => {
       await rejectOrderWithOptionalReason(ctx, pendingOrderId, text.trim());
       return;
     }
+  }
+
+  if (!session.language) {
+    return ctx.reply("Please tap /start first to choose a language.");
   }
 
   if (isOrderStatusIntent(text)) {
@@ -1174,7 +1687,8 @@ bot.on("text", async (ctx) => {
     );
   }
 
-  const casualGreeting = /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|can\s+you\s+help|yo)\b/i;
+  const casualGreeting =
+    /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|can\s+you\s+help|yo)\b/i;
   if (casualGreeting.test(normalized)) {
     await ctx.reply(
       t(
@@ -1187,7 +1701,8 @@ bot.on("text", async (ctx) => {
     return;
   }
 
-  const cartLookUp = /(?:what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|show\s+my\s+cart|view\s+cart|check\s+my\s+cart|my\s+cart|cart\s+please)/i;
+  const cartLookUp =
+    /(?:what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|show\s+my\s+cart|view\s+cart|check\s+my\s+cart|my\s+cart|cart\s+please)/i;
   if (cartLookUp.test(normalized)) {
     try {
       await showCartText(ctx, session);
@@ -1264,9 +1779,10 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// ---- photo messages: payment screenshot ----
+// ---- photo messages: payment screenshot flow ----
 bot.on("photo", async (ctx) => {
   const chatId = ctx.chat.id;
+
   let session: Session;
 
   try {
