@@ -10,6 +10,7 @@ export interface Product {
   category?: string | null;
   color?: string | null;
   colors?: string[] | null;
+  image_url?: string | null;
 }
 
 export interface CartItem {

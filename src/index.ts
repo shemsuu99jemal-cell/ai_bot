@@ -1,14 +1,16 @@
 import "dotenv/config";
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf, Markup, Input } from "telegraf";
 import { handleMessage } from "./ai";
 import {
   supabase,
   createOrderFromCart,
+  deleteUnpaidOrder,
   attachScreenshot,
   setOrderStatus,
   getCategories,
   getProductsByCategory,
   getProduct,
+  getOrder,
   getRelatedProducts,
   searchProducts,
   getCustomerOrders,
@@ -82,7 +84,8 @@ type AdminDraftField =
   | "price"
   | "stock"
   | "category"
-  | "colors";
+  | "colors"
+  | "image";
 
 interface AdminDraft {
   mode: "create" | "edit";
@@ -94,6 +97,7 @@ interface AdminDraft {
   stock?: number;
   category?: string | null;
   colors?: string[] | null;
+  image_url?: string | null;
 }
 
 const adminDrafts = new Map<number, AdminDraft>();
@@ -172,10 +176,7 @@ async function showSellerOrders(ctx: any): Promise<void> {
   const orders = await listRecentOrders(10);
 
   if (orders.length === 0) {
-    return ctx.reply(
-      "No orders yet.",
-      sellerReplyKeyboard(),
-    );
+    return ctx.reply("No orders yet.", sellerReplyKeyboard());
   }
 
   const lines = orders.map((order) => {
@@ -200,7 +201,10 @@ function normalizeSellerActionText(value: string): string {
     .trim();
 }
 
-async function handleSellerKeyboardText(ctx: any, text: string): Promise<boolean> {
+async function handleSellerKeyboardText(
+  ctx: any,
+  text: string,
+): Promise<boolean> {
   const value = normalizeSellerActionText(text);
   if (!value) return false;
 
@@ -232,7 +236,8 @@ function adminEditMenuText(draft: AdminDraft): string {
     `💰 ${draft.price} ETB\n` +
     `📦 Stock: ${draft.stock}\n` +
     `🏷 Category: ${draft.category || "—"}\n` +
-    `🎨 Colors: ${draft.colors?.join(", ") || "—"}`
+    `🎨 Colors: ${draft.colors?.join(", ") || "—"}\n` +
+    `🖼 Image: ${draft.image_url ? "Attached" : "—"}`
   );
 }
 
@@ -251,11 +256,9 @@ function adminEditMenuKeyboard(productId: string): any {
       Markup.button.callback("📦 Stock", `admin_field_stock_${safeId}`),
     ],
     [
-      Markup.button.callback(
-        "🏷 Category",
-        `admin_field_category_${safeId}`,
-      ),
+      Markup.button.callback("🏷 Category", `admin_field_category_${safeId}`),
       Markup.button.callback("🎨 Colors", `admin_field_colors_${safeId}`),
+      Markup.button.callback("🖼 Image", `admin_field_image_${safeId}`),
     ],
     [Markup.button.callback("🗑 Delete Product", `admin_delete_${safeId}`)],
     [Markup.button.callback("✅ Done", "admin_done")],
@@ -272,6 +275,7 @@ async function finalizeNewProduct(ctx: any, draft: AdminDraft): Promise<void> {
       stock: draft.stock!,
       category: draft.category,
       colors: draft.colors,
+      image_url: draft.image_url,
     });
     adminDrafts.delete(chatId);
     await ctx.reply(
@@ -302,6 +306,7 @@ function refreshDraftFromProduct(product: Product): AdminDraft {
       : product.color
         ? [product.color]
         : null,
+    image_url: product.image_url || null,
   };
 }
 
@@ -343,7 +348,7 @@ async function handleAdminDraftText(
         draft.stock = stock;
         draft.step = "category";
         adminDrafts.set(chatId, draft);
-        return ctx.reply("Category? (e.g. Phones, Accessories — or /skip)");
+        return ctx.reply("Category? (e.g. Protein, Vitamins — or /skip)");
       }
       case "category":
         draft.category = skip ? null : text;
@@ -359,8 +364,17 @@ async function handleAdminDraftText(
               .split(",")
               .map((s) => s.trim())
               .filter(Boolean);
-        await finalizeNewProduct(ctx, draft);
-        return;
+        draft.step = "image";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply(
+          "Send a product photo, or /skip to continue without one.",
+        );
+      case "image":
+        if (skip) {
+          await finalizeNewProduct(ctx, draft);
+          return;
+        }
+        return ctx.reply("Please send the product image as a photo, or /skip.");
     }
     return;
   }
@@ -401,6 +415,8 @@ async function handleAdminDraftText(
               .map((s) => s.trim())
               .filter(Boolean);
         break;
+      case "image":
+        return ctx.reply("Please send the new product image as a photo.");
       default:
         return;
     }
@@ -449,8 +465,8 @@ async function sendMainMenu(
     message ||
       t(
         session,
-        "Welcome to the shop. Choose what you want next.",
-        "ወደ ሱቅ እንኳን ደህና መጡ። ምን ይፈልጋሉ?",
+        "Welcome to pixelSupplements! Choose a category to get started.",
+        "ወደ pixelSupplements እንኳን ደህና መጡ! ለመጀመር ምድብ ይምረጡ።",
       ),
     mainMenuKeyboard(session),
   );
@@ -512,12 +528,91 @@ async function showCustomerOrders(ctx: any, session: Session): Promise<void> {
       return `#${o.id.slice(0, 8)} — ${o.total} ETB — ${statusLabel(session, o.status)} (${date})`;
     });
 
-    await ctx.reply(lines.join("\n\n"), mainMenuKeyboard(session));
+    const actionRows = orders
+      .filter((order) => order.status === "awaiting_payment")
+      .map((order) => [
+        Markup.button.callback(
+          `💳 Pay #${order.id.slice(0, 8)}`,
+          `order_pay_${order.id}`,
+        ),
+        Markup.button.callback(
+          `❌ Cancel #${order.id.slice(0, 8)}`,
+          `order_cancel_${order.id}`,
+        ),
+      ]);
+
+    await ctx.reply(
+      lines.join("\n\n"),
+      actionRows.length
+        ? Markup.inlineKeyboard(actionRows)
+        : mainMenuKeyboard(session),
+    );
   } catch (err) {
     console.error(`Failed to fetch orders for chat ${ctx.chat.id}:`, err);
     await ctx.reply(friendlyErrorText(session), mainMenuKeyboard(session));
   }
 }
+
+bot.action(/^order_pay_([0-9a-f-]+)$/i, async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const session = await getSession(chatId);
+  await ctx.answerCbQuery();
+  const order = await getOrder(ctx.match[1]).catch(() => null);
+  if (!order || order.customer_telegram_id !== chatId) {
+    return ctx.reply(t(session, "That order was not found.", "ያ ትዕዛዝ አልተገኘም።"));
+  }
+  if (order.status !== "awaiting_payment") {
+    return ctx.reply(
+      t(
+        session,
+        "This order is no longer awaiting payment.",
+        "ይህ ትዕዛዝ ከእንግዲህ ክፍያ አይጠብቅም።",
+      ),
+    );
+  }
+
+  session.pendingOrderId = order.id;
+  await persist(chatId, session);
+  await ctx.reply(
+    t(
+      session,
+      `Order #${order.id.slice(0, 8)} — Total: ${order.total} ETB\n\nPlease pay to:\n${process.env.SELLER_PAYMENT_INFO}\n\nThen send your payment screenshot here. It will be sent to the admin for verification.`,
+      `ትዕዛዝ #${order.id.slice(0, 8)} — ጠቅላላ፦ ${order.total} ብር\n\nክፍያ ይፈጽሙ፦\n${process.env.SELLER_PAYMENT_INFO}\n\nከዚያ የክፍያ ስክሪንሾትዎን እዚህ ይላኩ። ለአስተዳዳሪ ማረጋገጫ ይላካል።`,
+    ),
+  );
+});
+
+bot.action(/^order_cancel_([0-9a-f-]+)$/i, async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const session = await getSession(chatId);
+  await ctx.answerCbQuery();
+  const order = await getOrder(ctx.match[1]).catch(() => null);
+  if (!order || order.customer_telegram_id !== chatId) {
+    return ctx.reply(t(session, "That order was not found.", "ያ ትዕዛዝ አልተገኘም።"));
+  }
+  if (order.status !== "awaiting_payment") {
+    return ctx.reply(
+      t(
+        session,
+        "This order can no longer be canceled.",
+        "ይህ ትዕዛዝ ከእንግዲህ ሊሰረዝ አይችልም።",
+      ),
+    );
+  }
+
+  try {
+    await deleteUnpaidOrder(order.id);
+    if (session.pendingOrderId === order.id) session.pendingOrderId = null;
+    await persist(chatId, session);
+    await ctx.reply(
+      t(session, "Order canceled and removed.", "ትዕዛዙ ተሰርዞ ከሰንጠረዥ ተወግዷል።"),
+    );
+    await showCustomerOrders(ctx, session);
+  } catch (err) {
+    console.error(`Failed to cancel order ${order.id}:`, err);
+    await ctx.reply(friendlyErrorText(session));
+  }
+});
 
 async function showLanguagePicker(ctx: any, session: Session): Promise<void> {
   await ctx.reply(
@@ -685,6 +780,32 @@ function statusLabel(session: Session, status: OrderStatus): string {
 
 // ---- category / product browsing ----
 
+async function resolveProductImage(
+  ctx: any,
+  product: Product,
+): Promise<any | null> {
+  if (!product.image_url) return null;
+  if (/^https?:\/\//i.test(product.image_url)) return product.image_url;
+
+  // Telegram file IDs can be sent directly. Older records may contain a
+  // Telegram file path, which must be downloaded and re-uploaded as bytes.
+  if (!/[/.]/.test(product.image_url)) return product.image_url;
+
+  try {
+    const fileLink = await ctx.telegram.getFileLink(product.image_url);
+    const response = await fetch(fileLink.href);
+    if (!response.ok)
+      throw new Error(`Image download failed: ${response.status}`);
+    return Input.fromBuffer(
+      Buffer.from(await response.arrayBuffer()),
+      `${product.id}.jpg`,
+    );
+  } catch (err) {
+    console.error(`Failed to resolve image for product ${product.id}:`, err);
+    return null;
+  }
+}
+
 async function showCategoryMenu(ctx: any, session: Session): Promise<void> {
   const categories = await getCategories();
   if (categories.length === 0) {
@@ -697,7 +818,7 @@ async function showCategoryMenu(ctx: any, session: Session): Promise<void> {
     );
   }
   const buttons = categories.map((c, i) =>
-    Markup.button.callback(c, `cat_${i}`),
+    Markup.button.callback(c, `cat_${i}_1`),
   );
   const rows: any[] = [];
   for (let i = 0; i < buttons.length; i += 2)
@@ -790,12 +911,27 @@ async function showProductResults(
     );
   }
 
-  const rows = products.map((p: any) => [
-    Markup.button.callback(
-      `${p.name} — ${p.price} ETB`,
-      `prod_${compactProductToken(p.id)}`,
-    ),
-  ]);
+  if (title) await ctx.reply(title);
+  for (const product of products) {
+    const imageUrl = await resolveProductImage(ctx, product);
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          `View ${product.name} — ${product.price} ETB`,
+          `prod_${compactProductToken(product.id)}`,
+        ),
+      ],
+    ]);
+    if (imageUrl) {
+      await ctx.replyWithPhoto(imageUrl, {
+        caption: `${product.name}\n${product.description || ""}\n💰 ${product.price} ETB`,
+        ...keyboard,
+      });
+    } else {
+      await ctx.reply(`${product.name}\n💰 ${product.price} ETB`, keyboard);
+    }
+  }
+  const rows: any[] = [];
   rows.push([
     Markup.button.callback(
       t(session, "🔙 Categories", "🔙 ምድቦች"),
@@ -804,7 +940,9 @@ async function showProductResults(
   ]);
 
   await ctx.reply(
-    title || t(session, `Results for “${query}” 🔎`, `ለ “${query}” ውጤቶች 🔎`),
+    title
+      ? t(session, "More options", "ተጨማሪ አማራጮች")
+      : t(session, `Results for “${query}” 🔎`, `ለ “${query}” ውጤቶች 🔎`),
     Markup.inlineKeyboard(rows),
   );
 }
@@ -864,19 +1002,26 @@ async function showProductDetail(
     Markup.button.callback(t(session, "🔙 Back", "🔙 ተመለስ"), "back_categories"),
   ]);
 
-  await ctx.reply(
-    `${product.name}\n\n${product.description || t(session, "Premium device for everyday use.", "ለየለይተኛ ጥቅም ለማገልገል ተስማሚ መሣሪያ።")}\n💰 ${t(session, "Price", "ዋጋ")}: ${product.price} ETB\n📦 ${t(session, "Stock", "ክምችት")}: ${product.stock}\n${colorLine}`,
-    Markup.inlineKeyboard(buttons),
-  );
+  const detailText = `${product.name}\n\n${product.description || t(session, "Quality supplement for your training routine.", "ለስልጠናዎ መደበኛ ሂደት ጥራት ያለው ማሟያ።")}\n💰 ${t(session, "Price", "ዋጋ")}: ${product.price} ETB\n📦 ${t(session, "Stock", "ክምችት")}: ${product.stock}\n${colorLine}`;
+  const imageUrl = await resolveProductImage(ctx, product);
+  if (imageUrl) {
+    await ctx.replyWithPhoto(imageUrl, {
+      caption: detailText,
+      reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
+    });
+  } else {
+    await ctx.reply(detailText, Markup.inlineKeyboard(buttons));
+  }
 }
 
-bot.action(/cat_(\d+)/, async (ctx) => {
+bot.action(/^cat_(\d+)(?:_(\d+))?$/, async (ctx) => {
   const chatId = ctx.chat!.id;
   const session = await getSession(chatId);
   await ctx.answerCbQuery();
 
   const categories = await getCategories();
   const idx = Number(ctx.match[1]);
+  const page = Math.max(1, Number(ctx.match[2] || 1));
   const category = categories[idx];
   if (!category)
     return ctx.reply(
@@ -898,25 +1043,125 @@ bot.action(/cat_(\d+)/, async (ctx) => {
     );
   }
 
-  const rows = products.map((p: any) => [
+  const pageSize = 5;
+  const totalPages = Math.ceil(products.length / pageSize);
+  const pageProducts = products.slice((page - 1) * pageSize, page * pageSize);
+
+  await ctx.reply(`📦 ${category} (${page}/${totalPages})`);
+  for (const product of pageProducts) {
+    const imageUrl = await resolveProductImage(ctx, product);
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          `🛒 Add ${product.name} — ${product.price} ETB`,
+          `add_selected_${compactProductToken(product.id)}_0`,
+        ),
+      ],
+    ]);
+    if (imageUrl) {
+      await ctx.replyWithPhoto(imageUrl, {
+        caption: `${product.name}\n${product.description || ""}\n💰 ${product.price} ETB`,
+        ...keyboard,
+      });
+    } else {
+      await ctx.reply(`${product.name}\n💰 ${product.price} ETB`, keyboard);
+    }
+  }
+  const navigation: any[] = [];
+  if (page > 1) {
+    navigation.push(
+      Markup.button.callback("⬅️ Previous", `cat_${idx}_${page - 1}`),
+    );
+  }
+  if (page < totalPages) {
+    navigation.push(
+      Markup.button.callback("Next ➡️", `cat_${idx}_${page + 1}`),
+    );
+  }
+  const footer: any[] = [];
+  if (navigation.length) footer.push(navigation);
+  footer.push([
     Markup.button.callback(
-      `${p.name} — ${p.price} ETB`,
-      `prod_${compactProductToken(p.id)}`,
-    ),
-  ]);
-  rows.push([
-    Markup.button.callback(
-      t(session, "🔙 Categories", "🔙 ምድቦች"),
+      t(session, "Back to categories", "ወደ ምድቦች"),
       "back_categories",
     ),
+    Markup.button.callback(t(session, "View cart", "ጋሪዬን ይመልከቱ"), "view_cart"),
   ]);
-
-  await ctx.reply(`📦 ${category}`, Markup.inlineKeyboard(rows));
+  await ctx.reply(
+    t(
+      session,
+      "Choose an item or browse the next page.",
+      "ምርት ይምረጡ ወይም ቀጣዩን ገጽ ይመልከቱ።",
+    ),
+    Markup.inlineKeyboard(footer),
+  );
 });
 
 bot.action("back_categories", async (ctx) => {
   const session = await getSession(ctx.chat!.id);
   await ctx.answerCbQuery();
+  if (session.pendingOrderId) {
+    return ctx.reply(
+      t(
+        session,
+        "You have an unpaid order. What would you like to do?",
+        "ያልተከፈለ ትዕዛዝ አለዎት። ምን ማድረግ ይፈልጋሉ?",
+      ),
+      pendingOrderDecisionKeyboard(session),
+    );
+  }
+  await showCategoryMenu(ctx, session);
+});
+
+function pendingOrderDecisionKeyboard(session: Session): any {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        t(session, "➕ Add more items", "➕ ተጨማሪ ምርቶች ጨምር"),
+        "keep_order_browse",
+      ),
+    ],
+    [
+      Markup.button.callback(
+        t(session, "❌ Cancel current order", "❌ የአሁኑን ትዕዛዝ ሰርዝ"),
+        "cancel_pending_order",
+      ),
+    ],
+  ]);
+}
+
+bot.action("keep_order_browse", async (ctx) => {
+  const session = await getSession(ctx.chat!.id);
+  await ctx.answerCbQuery();
+  await showCategoryMenu(ctx, session);
+});
+
+bot.action("cancel_pending_order", async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const session = await getSession(chatId);
+  await ctx.answerCbQuery();
+  if (session.pendingOrderId) {
+    try {
+      await deleteUnpaidOrder(session.pendingOrderId);
+    } catch (err) {
+      console.error(
+        `Failed to cancel unpaid order ${session.pendingOrderId}:`,
+        err,
+      );
+      return ctx.reply(friendlyErrorText(session));
+    }
+    session.pendingOrderId = null;
+  }
+  session.cart = [];
+  session.pendingStep = null;
+  await persist(chatId, session);
+  await ctx.reply(
+    t(
+      session,
+      "Order canceled. You can start a new order below.",
+      "ትዕዛዙ ተሰርዟል። ከታች አዲስ ትዕዛዝ መጀመር ይችላሉ።",
+    ),
+  );
   await showCategoryMenu(ctx, session);
 });
 
@@ -1197,7 +1442,7 @@ bot.action(/admin_edit_(.+)/, async (ctx) => {
 });
 
 bot.action(
-  /admin_field_(name|description|price|stock|category|colors)_(.+)/,
+  /admin_field_(name|description|price|stock|category|colors|image)_(.+)/,
   async (ctx) => {
     if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
     await ctx.answerCbQuery();
@@ -1217,6 +1462,7 @@ bot.action(
       stock: "Send the new stock quantity.",
       category: "Send the new category (or /skip to clear it).",
       colors: "Send the colors, comma-separated (or /skip to clear).",
+      image: "Send the new product image as a photo.",
     };
     await ctx.reply(prompts[field]);
   },
@@ -1251,7 +1497,12 @@ bot.action(/admin_delete_(.+)/, async (ctx) => {
           `admin_delete_confirm_${compactProductToken(productId)}`,
         ),
       ],
-      [Markup.button.callback("Cancel", `admin_edit_${compactProductToken(productId)}`)],
+      [
+        Markup.button.callback(
+          "Cancel",
+          `admin_edit_${compactProductToken(productId)}`,
+        ),
+      ],
     ]),
   );
 });
@@ -1794,6 +2045,34 @@ bot.on("photo", async (ctx) => {
     );
   }
 
+  const adminDraft = adminDrafts.get(chatId);
+  if (isSeller(ctx.from.id) && adminDraft?.step === "image") {
+    try {
+      const photos = ctx.message.photo;
+      const fileId = photos[photos.length - 1].file_id;
+
+      if (adminDraft.mode === "create") {
+        adminDraft.image_url = fileId;
+        await finalizeNewProduct(ctx, adminDraft);
+      } else if (adminDraft.productId) {
+        const updated = await updateProduct(adminDraft.productId, {
+          image_url: fileId,
+        });
+        const refreshed = refreshDraftFromProduct(updated);
+        adminDrafts.set(chatId, refreshed);
+        await ctx.reply("Image updated ✅");
+        await ctx.reply(
+          adminEditMenuText(refreshed),
+          adminEditMenuKeyboard(updated.id),
+        );
+      }
+    } catch (err) {
+      console.error("Failed to save product image:", err);
+      await ctx.reply("Something went wrong saving that product image.");
+    }
+    return;
+  }
+
   if (!session.pendingOrderId) {
     return ctx.reply(
       "I don't have a pending order for you — tell me what you'd like to buy first.",
@@ -1888,6 +2167,28 @@ bot.on("photo", async (ctx) => {
 });
 
 // ---- seller taps Confirm / Reject ----
+async function updateSellerOrderMessage(
+  ctx: any,
+  statusText: string,
+): Promise<void> {
+  const message = (ctx.callbackQuery as any)?.message;
+  const currentText = message?.caption || message?.text || "";
+  const updatedText = `${currentText}\n\n${statusText}`.trim();
+
+  try {
+    if (message?.photo || message?.caption !== undefined) {
+      await ctx.editMessageCaption(updatedText);
+    } else if (message?.text !== undefined) {
+      await ctx.editMessageText(updatedText);
+    } else {
+      await ctx.reply(statusText);
+    }
+  } catch (err) {
+    console.error("Failed to update seller order message:", err);
+    await ctx.reply(statusText);
+  }
+}
+
 bot.action(/confirm_(.+)/, async (ctx) => {
   if (String(ctx.from.id) !== String(process.env.SELLER_TELEGRAM_ID))
     return ctx.answerCbQuery("Not authorized");
@@ -1895,9 +2196,7 @@ bot.action(/confirm_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
     const order = await setOrderStatus(orderId, "confirmed");
     await ctx.answerCbQuery("Confirmed");
-    await ctx.editMessageCaption(
-      (ctx.callbackQuery as any).message.caption + "\n\n✅ CONFIRMED",
-    );
+    await updateSellerOrderMessage(ctx, "✅ CONFIRMED");
     const custSession = await getSession(Number(order.customer_telegram_id));
     await bot.telegram.sendMessage(
       order.customer_telegram_id,
@@ -1967,17 +2266,10 @@ async function rejectOrderWithOptionalReason(
     // explicit confirmation reply).
     if (ctx.callbackQuery) {
       await ctx.answerCbQuery("Rejected");
-      try {
-        await ctx.editMessageCaption(
-          (ctx.callbackQuery as any).message.caption +
-            `\n\n❌ REJECTED${reasonLine}`,
-        );
-      } catch (err) {
-        console.error("Failed to edit caption on reject:", err);
-        await ctx.reply(
-          `❌ Order #${orderId.slice(0, 8)} rejected${reasonLine}.`,
-        );
-      }
+      await updateSellerOrderMessage(
+        ctx,
+        `❌ Order #${orderId.slice(0, 8)} rejected${reasonLine}.`,
+      );
     } else {
       await ctx.reply(
         `❌ Order #${orderId.slice(0, 8)} rejected${reasonLine}.`,

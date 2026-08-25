@@ -75,7 +75,7 @@ const tools: ChatCompletionTool[] = [
     function: {
       name: "show_categories",
       description:
-        "Call this when the customer's request is broad/browsing rather than a specific product — e.g. 'what do you have', 'show me phones', 'what's available'. Shows a tappable category menu instead of guessing.",
+        "Call this when the customer's request is broad/browsing rather than a specific product — e.g. 'what do you have', 'show me protein', 'what's available'. Shows a tappable category menu instead of guessing.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -162,10 +162,10 @@ function systemPrompt(language: "en" | "am", customerName?: string): string {
     ? `Customer's name: ${customerName} (use it occasionally, not every message).`
     : "";
 
-  return `You're a warm, concise sales assistant for a phone/electronics shop on Telegram. Sound human, not scripted. 1-2 emojis max per message.
+  return `You're a warm, concise sales assistant for a gym supplements shop on Telegram. Sound human, not scripted. 1-2 emojis max per message.
 
 - Specific product asked about → search_products (never reuse old prices).
-- Broad/browsing request ("what do you have", "show me phones") → show_categories, don't guess.
+- Broad/browsing request ("what do you have", "show me protein") → show_categories, don't guess.
 - Customer picks a product+qty → add_to_cart, then ask what's next.
 - If the customer specifies a preferred color and the item has a matching color option, keep it on the cart item.
 - If the customer wants to remove something from the cart, use remove_from_cart.
@@ -207,7 +207,9 @@ function parseInlineToolAction(text: string): AiResult | null {
   const clean = text.replace(/<[^>]+>/g, "").trim();
   if (
     !clean ||
-    /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|i\s+need\s+help|can\s+you\s+help|what\s+can\s+you\s+do|ya|yo)\b/i.test(clean)
+    /^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|how\s+are\s+you\s+doing|what'?s\s+up|what\s+bout\s+my\s+cart|what\s+about\s+my\s+cart|thanks|thank\s+you|help|i\s+need\s+help|can\s+you\s+help|what\s+can\s+you\s+do|ya|yo)\b/i.test(
+      clean,
+    )
   ) {
     return null;
   }

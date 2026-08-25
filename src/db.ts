@@ -137,6 +137,7 @@ export async function createProduct(data: {
   stock: number;
   category?: string | null;
   colors?: string[] | null;
+  image_url?: string | null;
 }): Promise<Product> {
   const { data: product, error } = await supabase
     .from("products")
@@ -147,6 +148,7 @@ export async function createProduct(data: {
       stock: data.stock,
       category: data.category || null,
       colors: data.colors && data.colors.length ? data.colors : null,
+      image_url: data.image_url || null,
     })
     .select()
     .single();
@@ -164,6 +166,7 @@ export async function updateProduct(
     stock: number;
     category: string | null;
     colors: string[] | null;
+    image_url: string | null;
   }>,
 ): Promise<Product> {
   const { data, error } = await supabase
@@ -285,6 +288,29 @@ export async function attachScreenshot(
     .single();
   if (error) throw error;
   return data as Order;
+}
+
+export async function deleteUnpaidOrder(orderId: string): Promise<void> {
+  const { data: order, error: orderLookupError } = await supabase
+    .from("orders")
+    .select("status")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (orderLookupError) throw orderLookupError;
+  if (!order || order.status !== "awaiting_payment") return;
+
+  const { error: orderItemsError } = await supabase
+    .from("order_items")
+    .delete()
+    .eq("order_id", orderId);
+  if (orderItemsError) throw orderItemsError;
+
+  const { error } = await supabase
+    .from("orders")
+    .delete()
+    .eq("id", orderId)
+    .eq("status", "awaiting_payment");
+  if (error) throw error;
 }
 
 export async function setOrderStatus(
