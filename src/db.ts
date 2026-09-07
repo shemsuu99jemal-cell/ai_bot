@@ -145,6 +145,7 @@ export async function createProduct(data: {
     .from("products")
     .insert({
       name: data.name,
+      description: data.description?.trim() || null,
       price: data.price,
       category: data.category?.trim().toLowerCase() || "general",
       image_url: data.image_url || null,
@@ -160,6 +161,7 @@ export async function updateProduct(
   productId: string,
   updates: Partial<{
     name: string;
+    description: string | null;
     price: number;
     category: string | null;
     image_url: string | null;
@@ -167,6 +169,9 @@ export async function updateProduct(
 ): Promise<Product> {
   if (typeof updates.category === "string") {
     updates.category = updates.category.trim().toLowerCase();
+  }
+  if (typeof updates.description === "string") {
+    updates.description = updates.description.trim() || null;
   }
   const { data, error } = await supabase
     .from("products")

@@ -13,6 +13,7 @@ drop table if exists conversations cascade;
 create table products (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  description text,
   price numeric not null check (price >= 0),
   category text not null default 'general'
     check (category = lower(category)),

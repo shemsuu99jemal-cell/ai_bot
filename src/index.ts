@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Telegraf, Markup, Input } from "telegraf";
+import sharp from "sharp";
 import { handleMessage } from "./ai";
 import {
   supabase,
@@ -99,7 +100,7 @@ async function persist(chatId: number, session: Session): Promise<void> {
 // ---- admin: product CRUD (seller only, gated by isSeller everywhere) ----
 // ==========================================================================
 
-type AdminDraftField = "name" | "price" | "category" | "image";
+type AdminDraftField = "name" | "price" | "category" | "description" | "image";
 
 interface AdminDraft {
   mode: "create" | "edit";
@@ -108,6 +109,7 @@ interface AdminDraft {
   name?: string;
   price?: number;
   category?: string | null;
+  description?: string | null;
   image_url?: string | null;
 }
 
@@ -142,7 +144,7 @@ function sellerReplyKeyboard(): any {
   return Markup.keyboard([
     ["🏠 Start", "📦 Products"],
     ["🧾 Orders", "💳 Payments"],
-    ["➕ Add Product"],
+    ["➕ Add Product", "📘 Help"],
     ["🔄 Refresh", "📋 Menu"],
   ])
     .resize()
@@ -153,6 +155,270 @@ async function showSellerDashboard(ctx: any): Promise<void> {
   await ctx.reply(
     "Seller Dashboard\n\nManage products, payment accounts, inventory, and orders.",
     sellerReplyKeyboard(),
+  );
+}
+
+async function buildSellerHelpCard(): Promise<
+  ReturnType<typeof Input.fromBuffer>
+> {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+      <defs>
+        <linearGradient id="bg" x1="0" x2="1">
+          <stop offset="0%" stop-color="#0f172a"/>
+          <stop offset="100%" stop-color="#111827"/>
+        </linearGradient>
+        <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+          <path d="M0 0 L12 6 L0 12 Z" fill="#f8fafc"/>
+        </marker>
+      </defs>
+      <rect width="1200" height="800" fill="url(#bg)"/>
+      <rect x="80" y="60" width="1040" height="120" rx="24" fill="#1f2937" stroke="#3b82f6" stroke-width="2"/>
+      <text x="600" y="118" text-anchor="middle" fill="#f8fafc" font-size="42" font-weight="700" font-family="Arial, Helvetica, sans-serif">Seller Help</text>
+      <text x="600" y="152" text-anchor="middle" fill="#cbd5e1" font-size="20" font-family="Arial, Helvetica, sans-serif">Follow this flow from left to right</text>
+
+      <g>
+        <rect x="110" y="240" width="220" height="160" rx="22" fill="#0b1220" stroke="#22c55e" stroke-width="3"/>
+        <circle cx="150" cy="276" r="18" fill="#22c55e"/>
+        <text x="185" y="284" fill="#f8fafc" font-size="20" font-weight="700" font-family="Arial, Helvetica, sans-serif">1</text>
+        <text x="130" y="330" fill="#f8fafc" font-size="28" font-weight="700" font-family="Arial, Helvetica, sans-serif">Add</text>
+        <text x="130" y="362" fill="#cbd5e1" font-size="22" font-family="Arial, Helvetica, sans-serif">Product</text>
+      </g>
+
+      <g>
+        <rect x="350" y="240" width="220" height="160" rx="22" fill="#0b1220" stroke="#f59e0b" stroke-width="3"/>
+        <circle cx="390" cy="276" r="18" fill="#f59e0b"/>
+        <text x="425" y="284" fill="#111827" font-size="20" font-weight="700" font-family="Arial, Helvetica, sans-serif">2</text>
+        <text x="370" y="332" fill="#f8fafc" font-size="28" font-weight="700" font-family="Arial, Helvetica, sans-serif">Edit</text>
+        <text x="370" y="364" fill="#cbd5e1" font-size="22" font-family="Arial, Helvetica, sans-serif">Details</text>
+      </g>
+
+      <g>
+        <rect x="590" y="240" width="220" height="160" rx="22" fill="#0b1220" stroke="#60a5fa" stroke-width="3"/>
+        <circle cx="630" cy="276" r="18" fill="#60a5fa"/>
+        <text x="665" y="284" fill="#0f172a" font-size="20" font-weight="700" font-family="Arial, Helvetica, sans-serif">3</text>
+        <text x="610" y="332" fill="#f8fafc" font-size="28" font-weight="700" font-family="Arial, Helvetica, sans-serif">Orders</text>
+        <text x="610" y="364" fill="#cbd5e1" font-size="22" font-family="Arial, Helvetica, sans-serif">Review</text>
+      </g>
+
+      <g>
+        <rect x="830" y="240" width="220" height="160" rx="22" fill="#0b1220" stroke="#f472b6" stroke-width="3"/>
+        <circle cx="870" cy="276" r="18" fill="#f472b6"/>
+        <text x="905" y="284" fill="#0f172a" font-size="20" font-weight="700" font-family="Arial, Helvetica, sans-serif">4</text>
+        <text x="850" y="332" fill="#f8fafc" font-size="28" font-weight="700" font-family="Arial, Helvetica, sans-serif">Payments</text>
+        <text x="850" y="364" fill="#cbd5e1" font-size="22" font-family="Arial, Helvetica, sans-serif">Accounts</text>
+      </g>
+
+      <g>
+        <text x="340" y="230" text-anchor="middle" fill="#94a3b8" font-size="14" font-weight="700" font-family="Arial, Helvetica, sans-serif">NEXT</text>
+        <text x="580" y="230" text-anchor="middle" fill="#94a3b8" font-size="14" font-weight="700" font-family="Arial, Helvetica, sans-serif">NEXT</text>
+        <text x="820" y="230" text-anchor="middle" fill="#94a3b8" font-size="14" font-weight="700" font-family="Arial, Helvetica, sans-serif">NEXT</text>
+        <path d="M330 320 L350 320" stroke="#f8fafc" stroke-width="5" marker-end="url(#arrow)"/>
+        <path d="M570 320 L590 320" stroke="#f8fafc" stroke-width="5" marker-end="url(#arrow)"/>
+        <path d="M810 320 L830 320" stroke="#f8fafc" stroke-width="5" marker-end="url(#arrow)"/>
+      </g>
+
+      <rect x="180" y="470" width="840" height="180" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
+      <text x="210" y="520" fill="#f8fafc" font-size="26" font-weight="700" font-family="Arial, Helvetica, sans-serif">What to do next</text>
+      <text x="210" y="565" fill="#cbd5e1" font-size="22" font-family="Arial, Helvetica, sans-serif">Add product → edit details → review orders → manage payments</text>
+      <text x="210" y="610" fill="#94a3b8" font-size="18" font-family="Arial, Helvetica, sans-serif">Use /menu or tap the dashboard any time to go back</text>
+    </svg>
+  `;
+
+  const png = await sharp(Buffer.from(svg)).png().toBuffer();
+  return Input.fromBuffer(png, "seller-help.png");
+}
+
+async function showSellerFlowHelp(ctx: any): Promise<void> {
+  const helpImage = await buildSellerHelpCard();
+  const caption = [
+    "🗺️ Seller Help / የሻጭ እርዳታ",
+    "",
+    "ENGLISH: Follow the arrows from left to right.",
+    "1. Add product → 2. Edit details → 3. Review orders → 4. Manage payments",
+    "",
+    "አማርኛ፦ ቀስቶቹን ከግራ ወደ ቀኝ ይከተሉ።",
+    "1. ምርት ይጨምሩ → 2. ያስተካክሉ → 3. ትዕዛዝ ይገምግሙ → 4. ክፍያ ያስተዳድሩ",
+    "",
+    "Tap the buttons below or use /menu for the dashboard.",
+  ].join("\n");
+
+  await ctx.replyWithPhoto(helpImage, {
+    caption,
+    reply_markup: Markup.inlineKeyboard([
+      [Markup.button.callback("📦 Products", "seller_products")],
+      [Markup.button.callback("🧾 Orders", "seller_orders")],
+      [Markup.button.callback("💳 Payments", "seller_payments")],
+      [Markup.button.callback("🏠 Dashboard", "seller_dashboard")],
+    ]).reply_markup,
+  });
+
+  const fullGuide = [
+    "📚 Complete Seller Workflow / የሻጭ ሙሉ የስራ ሂደት",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "1. OPEN THE DASHBOARD / ዳሽቦርዱን ይክፈቱ",
+    "ENGLISH: Tap Dashboard or type /menu. This is your main control screen.",
+    "አማርኛ፦ ዳሽቦርድን ይጫኑ ወይም /menu ይጻፉ። ይህ ዋናው የመቆጣጠሪያ ገጽ ነው።",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "2. ADD A PRODUCT / ምርት ይጨምሩ",
+    "ENGLISH:",
+    "• Tap Products, then Add Product.",
+    "• Enter the product name and price.",
+    "• Choose a category and write a clear description.",
+    "• Send a product image, or skip the image when you do not have one.",
+    "• Check the final summary and save the product.",
+    "አማርኛ፦",
+    "• ምርቶችን ከዚያ ምርት ጨምርን ይጫኑ።",
+    "• የምርቱን ስምና ዋጋ ያስገቡ።",
+    "• ምድብ ይምረጡና ግልጽ መግለጫ ይጻፉ።",
+    "• የምርቱን ምስል ይላኩ፤ ምስል ከሌለዎት /skip ይጻፉ።",
+    "• የመጨረሻውን ማጠቃለያ ይመልከቱና ምርቱን ያስቀምጡ።",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "3. EDIT OR DELETE A PRODUCT / ምርት ያስተካክሉ ወይም ይሰርዙ",
+    "ENGLISH:",
+    "• Open Products and select the product.",
+    "• Choose Name, Price, Category, Description, or Image to update one detail.",
+    "• Save the change and return to the product list.",
+    "• To remove it, choose Delete Product and confirm.",
+    "አማርኛ፦",
+    "• ምርቶችን ክፍተው ምርቱን ይምረጡ።",
+    "• ስም፣ ዋጋ፣ ምድብ፣ መግለጫ ወይም ምስል በመምረጥ አንዱን መረጃ ያስተካክሉ።",
+    "• ለውጡን ያስቀምጡና ወደ ምርት ዝርዝር ይመለሱ።",
+    "• ለመሰረዝ ምርት ሰርዝን ይምረጡና ያረጋግጡ።",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "4. MANAGE ORDERS / ትዕዛዞችን ያስተዳድሩ",
+    "ENGLISH:",
+    "• Tap Orders to see the latest customer requests.",
+    "• Open each order and check the customer name, phone, items, total, and status.",
+    "• Confirm an order when the products are available and you can deliver.",
+    "• Reject an order when you cannot fulfill it, then contact the customer if needed.",
+    "• After payment is confirmed, prepare and deliver the order.",
+    "አማርኛ፦",
+    "• አዲስ የደንበኞችን ጥያቄ ለማየት ትዕዛዞችን ይጫኑ።",
+    "• እያንዳንዱን ትዕዛዝ ክፍተው የደንበኛውን ስም፣ ስልክ፣ እቃዎች፣ ጠቅላላ ዋጋ እና ሁኔታ ያረጋግጡ።",
+    "• ምርቱ ካለና ማቅረብ ከቻሉ ትዕዛዙን ያረጋግጡ።",
+    "• ማቅረብ ካልቻሉ ትዕዛዙን ይከልክሉና ካስፈለገ ደንበኛውን ያነጋግሩ።",
+    "• ክፍያው ከተረጋገጠ በኋላ ትዕዛዙን ያዘጋጁና ያቅርቡ።",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "5. SET UP PAYMENTS / የክፍያ አማራጭ ያዘጋጁ",
+    "ENGLISH:",
+    "• Tap Payments and choose Add payment option.",
+    "• Enter the payment method, account name, and account number.",
+    "• Edit incorrect details or deactivate an account you no longer use.",
+    "• Keep at least one active payment option so customers can pay.",
+    "አማርኛ፦",
+    "• ክፍያን ይጫኑና የክፍያ አማራጭ ጨምርን ይምረጡ።",
+    "• የክፍያ አይነት፣ የመለያ ስምና የመለያ ቁጥር ያስገቡ።",
+    "• የተሳሳተ መረጃ ያስተካክሉ ወይም የማይጠቀሙበትን መለያ ያቦዝኑ።",
+    "• ደንበኞች እንዲከፍሉ ቢያንስ አንድ ንቁ የክፍያ አማራጭ ያስቀምጡ።",
+    "",
+    "━━━━━━━━━━━━━━━━",
+    "6. DAILY ROUTINE / የዕለት ተዕለት ስራ",
+    "ENGLISH: Check Products for correct prices and stock, Orders for new requests, and Payments for active account details.",
+    "አማርኛ፦ በየቀኑ ዋጋና እቃ ትክክል መሆኑን በምርቶች፣ አዲስ ጥያቄ መኖሩን በትዕዛዞች፣ እና ንቁ የክፍያ መለያ መኖሩን በክፍያ ይመልከቱ።",
+    "",
+    "ENGLISH: Use Dashboard or /menu to return home. Use Help whenever you need this guide again.",
+    "አማርኛ፦ ወደ መነሻ ለመመለስ ዳሽቦርድን ወይም /menu ይጠቀሙ። ይህን መመሪያ እንደገና ለማየት እርዳታን ይጫኑ።",
+  ].join("\n");
+  const guideKeyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("📘 Choose another help / ሌላ እርዳታ", "seller_help")],
+    [Markup.button.callback("🏠 Dashboard / ዳሽቦርድ", "seller_dashboard")],
+  ]);
+  let remaining = fullGuide;
+  while (remaining.length > 3900) {
+    const breakAt = remaining.lastIndexOf("\n", 3900);
+    await ctx.reply(remaining.slice(0, breakAt > 0 ? breakAt : 3900));
+    remaining = remaining.slice(breakAt > 0 ? breakAt + 1 : 3900);
+  }
+  await ctx.reply(remaining, guideKeyboard);
+}
+
+async function showSellerHelp(ctx: any): Promise<void> {
+  await ctx.reply(
+    [
+      "📘 Seller Help / የሻጭ እርዳታ",
+      "",
+      "What do you need help with? Select one topic below.",
+      "በምን ነገር እርዳታ ያስፈልግዎታል? ከታች አንዱን ይምረጡ።",
+    ].join("\n"),
+    Markup.inlineKeyboard([
+      [Markup.button.callback("📦 Products / ምርቶች", "seller_help_products")],
+      [Markup.button.callback("🧾 Orders / ትዕዛዞች", "seller_help_orders")],
+      [Markup.button.callback("💳 Payments / ክፍያ", "seller_help_payments")],
+      [Markup.button.callback("🗺️ Full Flow / ሙሉ ሂደት", "seller_help_flow")],
+      [Markup.button.callback("🏠 Dashboard / ዳሽቦርድ", "seller_dashboard")],
+    ]),
+  );
+}
+
+async function showSellerHelpTopic(
+  ctx: any,
+  topic: "products" | "orders" | "payments",
+): Promise<void> {
+  const guides = {
+    products: [
+      "📦 Products / ምርቶች",
+      "",
+      "ENGLISH",
+      "1. Tap Products.",
+      "2. Tap Add Product and enter the name, price, category, description, and image.",
+      "3. Tap a product to edit its details or delete it.",
+      "4. Check the product list to confirm the changes.",
+      "",
+      "አማርኛ",
+      "1. የምርቶች ቁልፍን ይጫኑ።",
+      "2. ምርት ጨምርን ይጫኑ፤ ስም፣ ዋጋ፣ ምድብ፣ መግለጫ እና ምስል ያስገቡ።",
+      "3. ለማስተካከል ወይም ለመሰረዝ ምርቱን ይምረጡ።",
+      "4. ለውጡ መቀመጡን በምርት ዝርዝሩ ያረጋግጡ።",
+    ],
+    orders: [
+      "🧾 Orders / ትዕዛዞች",
+      "",
+      "ENGLISH",
+      "1. Tap Orders to see recent customer orders.",
+      "2. Open an order and check the customer, items, total, and contact details.",
+      "3. Confirm the order when you can fulfill it, or reject it when necessary.",
+      "4. Contact the customer and deliver after payment is confirmed.",
+      "",
+      "አማርኛ",
+      "1. የቅርብ ጊዜ የደንበኞችን ትዕዛዝ ለማየት ትዕዛዞችን ይጫኑ።",
+      "2. ትዕዛዙን ከፍተው ደንበኛውን፣ እቃዎችን፣ ጠቅላላ ዋጋን እና ስልክ ያረጋግጡ።",
+      "3. ማቅረብ ከቻሉ ትዕዛዙን ያረጋግጡ፤ ካልቻሉ ይከልክሉ።",
+      "4. ክፍያው ከተረጋገጠ በኋላ ደንበኛውን ያነጋግሩና እቃውን ያቅርቡ።",
+    ],
+    payments: [
+      "💳 Payments / ክፍያ",
+      "",
+      "ENGLISH",
+      "1. Tap Payments.",
+      "2. Add a payment account with the correct name and account number.",
+      "3. Edit or deactivate an old account when details change.",
+      "4. Keep at least one active payment option for customers.",
+      "",
+      "አማርኛ",
+      "1. የክፍያ ቁልፍን ይጫኑ።",
+      "2. ትክክለኛ የመለያ ስምና ቁጥር ያለው የክፍያ መለያ ይጨምሩ።",
+      "3. መረጃው ከተቀየረ የቆየውን መለያ ያስተካክሉ ወይም ያቦዝኑ።",
+      "4. ለደንበኞች ቢያንስ አንድ ንቁ የክፍያ አማራጭ ያስቀምጡ።",
+    ],
+  };
+
+  await ctx.reply(
+    guides[topic].join("\n"),
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "📘 Choose another help / ሌላ እርዳታ",
+          "seller_help",
+        ),
+      ],
+      [Markup.button.callback("🏠 Dashboard / ዳሽቦርድ", "seller_dashboard")],
+    ]),
   );
 }
 
@@ -262,6 +528,7 @@ async function handleSellerKeyboardText(
     products: () => showAdminProductList(ctx, 1),
     orders: () => showSellerOrders(ctx),
     payments: () => showPaymentMethods(ctx),
+    help: () => showSellerHelp(ctx),
     "add product": async () => {
       adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
       await ctx.reply(
@@ -278,11 +545,23 @@ async function handleSellerKeyboardText(
   return true;
 }
 
+function truncateText(
+  value: string | null | undefined,
+  maxLength = 120,
+): string {
+  const clean = (value || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "—";
+  return clean.length > maxLength
+    ? `${clean.slice(0, maxLength - 1).trim()}…`
+    : clean;
+}
+
 function adminEditMenuText(draft: AdminDraft): string {
   return (
     `${draft.name}\n\n` +
     `💰 ${draft.price} ETB\n` +
     `🏷 Category: ${draft.category || "—"}\n` +
+    `📝 Description: ${truncateText(draft.description, 120)}\n` +
     `🖼 Image: ${draft.image_url ? "Attached" : "—"}`
   );
 }
@@ -294,6 +573,10 @@ function adminEditMenuKeyboard(productId: string): any {
     [
       Markup.button.callback("💰 Price", `admin_field_price_${safeId}`),
       Markup.button.callback("🏷 Category", `admin_field_category_${safeId}`),
+      Markup.button.callback(
+        "📝 Description",
+        `admin_field_description_${safeId}`,
+      ),
       Markup.button.callback("🖼 Image", `admin_field_image_${safeId}`),
     ],
     [Markup.button.callback("🗑 Delete Product", `admin_delete_${safeId}`)],
@@ -306,6 +589,7 @@ async function finalizeNewProduct(ctx: any, draft: AdminDraft): Promise<void> {
   try {
     const product = await createProduct({
       name: draft.name!,
+      description: draft.description || null,
       price: draft.price!,
       category: draft.category || "General",
       image_url: draft.image_url,
@@ -332,6 +616,7 @@ function refreshDraftFromProduct(product: Product): AdminDraft {
     name: product.name,
     price: product.price,
     category: product.category || null,
+    description: product.description || null,
     image_url: product.image_url || null,
   };
 }
@@ -416,6 +701,14 @@ async function handleAdminDraftText(
         if (!category || skip)
           return ctx.reply("Please send a category, for example protein.");
         draft.category = category;
+        draft.step = "description";
+        adminDrafts.set(chatId, draft);
+        return ctx.reply(
+          "Write a short product description, or /skip to leave it blank.",
+        );
+      }
+      case "description": {
+        draft.description = skip ? null : text.trim();
         draft.step = "image";
         adminDrafts.set(chatId, draft);
         return ctx.reply("Send the product image as a photo, or /skip.");
@@ -449,6 +742,9 @@ async function handleAdminDraftText(
         updates.category = skip
           ? null
           : text.trim().toLowerCase().replace(/\s+/g, " ");
+        break;
+      case "description":
+        updates.description = skip ? null : text.trim();
         break;
       case "image":
         return ctx.reply("Please send the new product image as a photo.");
@@ -947,11 +1243,58 @@ bot.command("admin", async (ctx) => {
   await showAdminProductList(ctx, 1);
 });
 
+bot.command("help", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return;
+  await showSellerHelp(ctx);
+});
+
+bot.action("seller_help", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerHelp(ctx);
+});
+
+bot.action("seller_help_products", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerHelpTopic(ctx, "products");
+});
+
+bot.action("seller_help_orders", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerHelpTopic(ctx, "orders");
+});
+
+bot.action("seller_help_payments", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerHelpTopic(ctx, "payments");
+});
+
+bot.action("seller_help_flow", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showSellerFlowHelp(ctx);
+});
+
 bot.command("addproduct", async (ctx) => {
   if (!isSeller(ctx.from.id)) return;
   adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
   await ctx.reply("Let's add a new product. What's the product name?");
 });
+
+function productSummaryText(product: Product): string {
+  const description = (product.description || "").replace(/\s+/g, " ").trim();
+  const lines = [`${product.name}`];
+  if (description)
+    lines.push(
+      `\n📝 ${description.length > 120 ? `${description.slice(0, 119).trim()}…` : description}`,
+    );
+  lines.push(`🏷 ${product.category || "General"}`);
+  lines.push(`💰 ${product.price} ETB`);
+  return lines.join("\n");
+}
 
 async function showProductResults(
   ctx: any,
@@ -981,13 +1324,14 @@ async function showProductResults(
         ),
       ],
     ]);
+    const caption = productSummaryText(product);
     if (imageUrl) {
       await ctx.replyWithPhoto(imageUrl, {
-        caption: `${product.name}\n🏷 ${product.category}\n💰 ${product.price} ETB`,
+        caption,
         ...keyboard,
       });
     } else {
-      await ctx.reply(`${product.name}\n💰 ${product.price} ETB`, keyboard);
+      await ctx.reply(caption, keyboard);
     }
   }
   const rows: any[] = [];
@@ -1035,7 +1379,17 @@ async function showProductDetail(
     Markup.button.callback(t(session, "🔙 Back", "🔙 ተመለስ"), "back_categories"),
   ]);
 
-  const detailText = `${product.name}\n\n${t(session, "Price", "ዋጋ")}: ${product.price} ETB\n🏷 ${product.category}`;
+  const description = (product.description || "").replace(/\s+/g, " ").trim();
+  const detailText = [
+    product.name,
+    "",
+    description
+      ? `📝 ${description.length > 180 ? `${description.slice(0, 179).trim()}…` : description}`
+      : "📝 No description yet.",
+    "",
+    `${t(session, "Price", "ዋጋ")}: ${product.price} ETB`,
+    `🏷 ${product.category || "General"}`,
+  ].join("\n");
   const imageUrl = await resolveProductImage(ctx, product);
   if (imageUrl) {
     await ctx.replyWithPhoto(imageUrl, {
@@ -1522,26 +1876,30 @@ bot.action(/admin_edit_(.+)/, async (ctx) => {
   await ctx.reply(adminEditMenuText(draft), adminEditMenuKeyboard(product.id));
 });
 
-bot.action(/admin_field_(name|price|category|image)_(.+)/, async (ctx) => {
-  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
-  await ctx.answerCbQuery();
-  const field = ctx.match[1] as AdminDraftField;
-  const productId = restoreProductId(ctx.match[2]);
-  const draft = adminDrafts.get(ctx.chat!.id);
-  if (!draft || draft.productId !== productId)
-    return ctx.reply("Session expired — tap /menu to start again.");
+bot.action(
+  /admin_field_(name|price|category|description|image)_(.+)/,
+  async (ctx) => {
+    if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+    await ctx.answerCbQuery();
+    const field = ctx.match[1] as AdminDraftField;
+    const productId = restoreProductId(ctx.match[2]);
+    const draft = adminDrafts.get(ctx.chat!.id);
+    if (!draft || draft.productId !== productId)
+      return ctx.reply("Session expired — tap /menu to start again.");
 
-  draft.step = field;
-  adminDrafts.set(ctx.chat!.id, draft);
+    draft.step = field;
+    adminDrafts.set(ctx.chat!.id, draft);
 
-  const prompts: Record<AdminDraftField, string> = {
-    name: "Send the new product name.",
-    price: "Send the new price (numbers only, in ETB).",
-    category: "Send the new category in lowercase.",
-    image: "Send the new product image as a photo.",
-  };
-  await ctx.reply(prompts[field]);
-});
+    const prompts: Record<AdminDraftField, string> = {
+      name: "Send the new product name.",
+      price: "Send the new price (numbers only, in ETB).",
+      category: "Send the new category in lowercase.",
+      description: "Send the new product description.",
+      image: "Send the new product image as a photo.",
+    };
+    await ctx.reply(prompts[field]);
+  },
+);
 
 bot.action(/^admin_delete_confirm_(.+)$/, async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
