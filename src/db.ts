@@ -1,5 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
-import type { Product, Order, CartItem, Session, OrderStatus } from "./types";
+import type {
+  Product,
+  Order,
+  CartItem,
+  Session,
+  OrderStatus,
+  PaymentMethod,
+} from "./types";
 
 export const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -15,8 +22,7 @@ export async function searchProducts(query: string): Promise<Product[]> {
   const { data, error } = await supabase
     .from("products")
     .select("*")
-    .or(`name.ilike.%${safe}%,description.ilike.%${safe}%,aliases.cs.{${safe}}`)
-    .gt("stock", 0)
+    .or(`name.ilike.%${safe}%,category.ilike.%${safe}%`)
     .limit(10);
   if (error) throw error;
   return data as Product[];
@@ -45,7 +51,6 @@ export async function getCategories(): Promise<string[]> {
   const { data, error } = await supabase
     .from("products")
     .select("category")
-    .gt("stock", 0)
     .not("category", "is", null)
     .order("category", { ascending: true });
   if (error) throw error;
@@ -64,7 +69,6 @@ export async function getProductsByCategory(
     .from("products")
     .select("*")
     .eq("category", category)
-    .gt("stock", 0)
     .order("name", { ascending: true })
     .limit(20);
   if (error) throw error;
@@ -97,7 +101,6 @@ export async function getRelatedProducts(
       .from("products")
       .select("*")
       .neq("id", productId)
-      .gt("stock", 0)
       .order("price", { ascending: usePriceOrder })
       .limit(limit);
 
@@ -134,7 +137,6 @@ export async function createProduct(data: {
   name: string;
   description?: string | null;
   price: number;
-  stock: number;
   category?: string | null;
   colors?: string[] | null;
   image_url?: string | null;
@@ -143,11 +145,8 @@ export async function createProduct(data: {
     .from("products")
     .insert({
       name: data.name,
-      description: data.description || null,
       price: data.price,
-      stock: data.stock,
-      category: data.category || null,
-      colors: data.colors && data.colors.length ? data.colors : null,
+      category: data.category?.trim().toLowerCase() || "general",
       image_url: data.image_url || null,
     })
     .select()
@@ -161,14 +160,14 @@ export async function updateProduct(
   productId: string,
   updates: Partial<{
     name: string;
-    description: string | null;
     price: number;
-    stock: number;
     category: string | null;
-    colors: string[] | null;
     image_url: string | null;
   }>,
 ): Promise<Product> {
+  if (typeof updates.category === "string") {
+    updates.category = updates.category.trim().toLowerCase();
+  }
   const { data, error } = await supabase
     .from("products")
     .update(updates)
@@ -214,11 +213,85 @@ export async function listRecentOrders(limit = 10): Promise<Order[]> {
   const { data, error } = await supabase
     .from("orders")
     .select("*")
+    .neq("status", "awaiting_payment")
     .order("created_at", { ascending: false })
     .limit(limit);
 
   if (error) throw error;
   return (data || []) as Order[];
+}
+
+export async function deleteExpiredUnpaidOrders(
+  olderThanMinutes = 10,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMinutes * 60_000).toISOString();
+  const { data: expired, error: lookupError } = await supabase
+    .from("orders")
+    .select("id, customer_telegram_id")
+    .eq("status", "awaiting_payment")
+    .lt("created_at", cutoff);
+  if (lookupError) throw lookupError;
+
+  for (const order of expired || []) {
+    await deleteUnpaidOrder(order.id);
+    const { error: sessionError } = await supabase
+      .from("conversations")
+      .update({ pending_order_id: null })
+      .eq("chat_id", order.customer_telegram_id)
+      .eq("pending_order_id", order.id);
+    if (sessionError) throw sessionError;
+  }
+  return expired?.length || 0;
+}
+
+export async function listPaymentMethods(
+  activeOnly = true,
+): Promise<PaymentMethod[]> {
+  let query = supabase
+    .from("payment_methods")
+    .select("*")
+    .order("name", { ascending: true });
+  if (activeOnly) query = query.eq("is_active", true);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []) as PaymentMethod[];
+}
+
+export async function createPaymentMethod(data: {
+  name: string;
+  account_number: string;
+  account_name?: string | null;
+  instructions?: string | null;
+}): Promise<PaymentMethod> {
+  const { data: method, error } = await supabase
+    .from("payment_methods")
+    .insert({ ...data, is_active: true })
+    .select()
+    .single();
+  if (error) throw error;
+  return method as PaymentMethod;
+}
+
+export async function updatePaymentMethod(
+  id: string,
+  updates: Partial<PaymentMethod>,
+): Promise<PaymentMethod> {
+  const { data, error } = await supabase
+    .from("payment_methods")
+    .update(updates)
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw error;
+  return data as PaymentMethod;
+}
+
+export async function deletePaymentMethod(id: string): Promise<void> {
+  const { error } = await supabase
+    .from("payment_methods")
+    .update({ is_active: false })
+    .eq("id", id);
+  if (error) throw error;
 }
 
 // ---- orders ----
@@ -231,6 +304,7 @@ export async function createOrderFromCart(
     customerPhone?: string | null;
     deliveryLocation?: string | null;
     deliveryFee?: number;
+    paymentMethod?: PaymentMethod;
   },
 ): Promise<Order> {
   const subtotal = cart.reduce(
@@ -251,6 +325,10 @@ export async function createOrderFromCart(
       subtotal,
       total,
       status: "awaiting_payment",
+      payment_method_id: delivery?.paymentMethod?.id || null,
+      payment_method_name: delivery?.paymentMethod?.name || null,
+      payment_account_number: delivery?.paymentMethod?.account_number || null,
+      payment_account_name: delivery?.paymentMethod?.account_name || null,
     })
     .select()
     .single();

@@ -15,6 +15,16 @@ create table if not exists products (
   created_at timestamptz default now()
 );
 
+create table if not exists payment_methods (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  account_number text not null,
+  account_name text,
+  instructions text,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists orders (
   id uuid primary key default gen_random_uuid(),
   customer_telegram_id bigint not null,
@@ -32,6 +42,11 @@ create table if not exists orders (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+alter table orders add column if not exists payment_method_id uuid;
+alter table orders add column if not exists payment_method_name text;
+alter table orders add column if not exists payment_account_number text;
+alter table orders add column if not exists payment_account_name text;
 
 create table if not exists order_items (
   id uuid primary key default gen_random_uuid(),

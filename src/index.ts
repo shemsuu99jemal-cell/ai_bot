@@ -19,10 +19,14 @@ import {
   deleteProduct,
   listAllProducts,
   listRecentOrders,
+  listPaymentMethods,
+  createPaymentMethod,
+  updatePaymentMethod,
+  deletePaymentMethod,
 } from "./db";
 import { loadSession, saveSession } from "./db";
 import { runEscalationCycle, startEscalationJob } from "./cron";
-import type { Session, OrderStatus, Product } from "./types";
+import type { Session, OrderStatus, Product, PaymentMethod } from "./types";
 
 const REQUIRED_ENV = [
   "BOT_TOKEN",
@@ -31,7 +35,6 @@ const REQUIRED_ENV = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_KEY",
   "SELLER_TELEGRAM_ID",
-  "SELLER_PAYMENT_INFO",
   "SELLER_PHONE_NUMBER",
 ];
 
@@ -58,6 +61,24 @@ function isSeller(userId: number): boolean {
   return String(userId) === String(process.env.SELLER_TELEGRAM_ID);
 }
 
+async function answerCallbackSafely(ctx: any, text?: string): Promise<void> {
+  try {
+    await ctx.answerCbQuery(text);
+  } catch (err) {
+    console.warn("Could not acknowledge Telegram callback query:", err);
+  }
+}
+
+bot.use(async (ctx: any, next) => {
+  const answerCallback = ctx.answerCbQuery.bind(ctx);
+  ctx.answerCbQuery = (...args: any[]) =>
+    answerCallback(...args).catch((err: unknown) => {
+      console.warn("Could not acknowledge Telegram callback query:", err);
+      return true;
+    });
+  await next();
+});
+
 async function getSession(chatId: number): Promise<Session> {
   if (cache.has(chatId)) return cache.get(chatId)!;
   const session = await loadSession(chatId);
@@ -78,29 +99,28 @@ async function persist(chatId: number, session: Session): Promise<void> {
 // ---- admin: product CRUD (seller only, gated by isSeller everywhere) ----
 // ==========================================================================
 
-type AdminDraftField =
-  | "name"
-  | "description"
-  | "price"
-  | "stock"
-  | "category"
-  | "colors"
-  | "image";
+type AdminDraftField = "name" | "price" | "category" | "image";
 
 interface AdminDraft {
   mode: "create" | "edit";
   productId?: string;
   step: AdminDraftField | null;
   name?: string;
-  description?: string | null;
   price?: number;
-  stock?: number;
   category?: string | null;
-  colors?: string[] | null;
   image_url?: string | null;
 }
 
 const adminDrafts = new Map<number, AdminDraft>();
+type PaymentDraft = {
+  mode: "create" | "edit";
+  id?: string;
+  step: "name" | "account_number" | "account_name";
+  name?: string;
+  account_number?: string;
+  account_name?: string | null;
+};
+const paymentDrafts = new Map<number, PaymentDraft>();
 const PRODUCTS_PAGE_SIZE = 8;
 
 function compactProductToken(value: string): string {
@@ -121,7 +141,8 @@ function restoreProductId(value: string): string {
 function sellerReplyKeyboard(): any {
   return Markup.keyboard([
     ["🏠 Start", "📦 Products"],
-    ["🧾 Orders", "➕ Add Product"],
+    ["🧾 Orders", "💳 Payments"],
+    ["➕ Add Product"],
     ["🔄 Refresh", "📋 Menu"],
   ])
     .resize()
@@ -130,9 +151,36 @@ function sellerReplyKeyboard(): any {
 
 async function showSellerDashboard(ctx: any): Promise<void> {
   await ctx.reply(
-    "Seller Dashboard\n\nManage products, inventory, and recent orders.",
+    "Seller Dashboard\n\nManage products, payment accounts, inventory, and orders.",
     sellerReplyKeyboard(),
   );
+}
+
+async function showPaymentMethods(ctx: any): Promise<void> {
+  const methods = await listPaymentMethods(false);
+  const rows = methods.flatMap((method) => [
+    [
+      Markup.button.callback(
+        `${method.is_active ? "✅" : "⏸️"} ${method.name} — ${method.account_number}`,
+        `payment_edit_${method.id}`,
+      ),
+    ],
+    method.is_active
+      ? [Markup.button.callback("Deactivate", `payment_delete_${method.id}`)]
+      : [],
+  ]);
+  rows.push([Markup.button.callback("➕ Add payment option", "payment_add")]);
+  rows.push([Markup.button.callback("⬅️ Dashboard", "seller_dashboard")]);
+  await ctx.reply(
+    methods.length
+      ? "💳 Payment options"
+      : "No payment options configured yet.",
+    Markup.inlineKeyboard(rows),
+  );
+}
+
+function paymentMethodText(method: PaymentMethod): string {
+  return `${method.name}\nAccount: ${method.account_number}\nName: ${method.account_name || "—"}\nStatus: ${method.is_active ? "Active" : "Inactive"}`;
 }
 
 async function showAdminProductList(ctx: any, page = 1): Promise<void> {
@@ -148,7 +196,7 @@ async function showAdminProductList(ctx: any, page = 1): Promise<void> {
 
   const rows = products.map((p) => [
     Markup.button.callback(
-      `${p.stock === 0 ? "⚠️ " : ""}${p.name} — ${p.price} ETB (${p.stock} in stock)`,
+      `${p.name} — ${p.price} ETB`,
       `admin_edit_${compactProductToken(p.id)}`,
     ),
   ]);
@@ -213,6 +261,7 @@ async function handleSellerKeyboardText(
     menu: () => showSellerDashboard(ctx),
     products: () => showAdminProductList(ctx, 1),
     orders: () => showSellerOrders(ctx),
+    payments: () => showPaymentMethods(ctx),
     "add product": async () => {
       adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
       await ctx.reply(
@@ -232,11 +281,8 @@ async function handleSellerKeyboardText(
 function adminEditMenuText(draft: AdminDraft): string {
   return (
     `${draft.name}\n\n` +
-    `📝 ${draft.description || "No description"}\n` +
     `💰 ${draft.price} ETB\n` +
-    `📦 Stock: ${draft.stock}\n` +
     `🏷 Category: ${draft.category || "—"}\n` +
-    `🎨 Colors: ${draft.colors?.join(", ") || "—"}\n` +
     `🖼 Image: ${draft.image_url ? "Attached" : "—"}`
   );
 }
@@ -244,20 +290,10 @@ function adminEditMenuText(draft: AdminDraft): string {
 function adminEditMenuKeyboard(productId: string): any {
   const safeId = compactProductToken(productId);
   return Markup.inlineKeyboard([
-    [
-      Markup.button.callback("✏️ Name", `admin_field_name_${safeId}`),
-      Markup.button.callback(
-        "📝 Description",
-        `admin_field_description_${safeId}`,
-      ),
-    ],
+    [Markup.button.callback("✏️ Name", `admin_field_name_${safeId}`)],
     [
       Markup.button.callback("💰 Price", `admin_field_price_${safeId}`),
-      Markup.button.callback("📦 Stock", `admin_field_stock_${safeId}`),
-    ],
-    [
       Markup.button.callback("🏷 Category", `admin_field_category_${safeId}`),
-      Markup.button.callback("🎨 Colors", `admin_field_colors_${safeId}`),
       Markup.button.callback("🖼 Image", `admin_field_image_${safeId}`),
     ],
     [Markup.button.callback("🗑 Delete Product", `admin_delete_${safeId}`)],
@@ -270,11 +306,8 @@ async function finalizeNewProduct(ctx: any, draft: AdminDraft): Promise<void> {
   try {
     const product = await createProduct({
       name: draft.name!,
-      description: draft.description,
       price: draft.price!,
-      stock: draft.stock!,
-      category: draft.category,
-      colors: draft.colors,
+      category: draft.category || "General",
       image_url: draft.image_url,
     });
     adminDrafts.delete(chatId);
@@ -297,17 +330,57 @@ function refreshDraftFromProduct(product: Product): AdminDraft {
     productId: product.id,
     step: null,
     name: product.name,
-    description: product.description || null,
     price: product.price,
-    stock: product.stock,
     category: product.category || null,
-    colors: Array.isArray(product.colors)
-      ? product.colors
-      : product.color
-        ? [product.color]
-        : null,
     image_url: product.image_url || null,
   };
+}
+
+async function handlePaymentDraftText(
+  ctx: any,
+  draft: PaymentDraft,
+  text: string,
+): Promise<void> {
+  const value = text.trim();
+  if (draft.step === "name") {
+    if (value !== "/skip") draft.name = value;
+    if (!draft.name) return ctx.reply("Payment name is required.");
+    draft.step = "account_number";
+    paymentDrafts.set(ctx.chat.id, draft);
+    return ctx.reply(
+      "Send the Telebirr or CBE account number, or /skip to keep it.",
+    );
+  }
+  if (draft.step === "account_number") {
+    if (value !== "/skip") draft.account_number = value;
+    if (!draft.account_number) return ctx.reply("Account number is required.");
+    draft.step = "account_name";
+    paymentDrafts.set(ctx.chat.id, draft);
+    return ctx.reply("Account holder name, or /skip if not needed.");
+  }
+
+  if (value !== "/skip") draft.account_name = value;
+  try {
+    if (draft.mode === "create") {
+      await createPaymentMethod({
+        name: draft.name!,
+        account_number: draft.account_number!,
+        account_name: draft.account_name || null,
+      });
+    } else {
+      await updatePaymentMethod(draft.id!, {
+        name: draft.name!,
+        account_number: draft.account_number!,
+        account_name: draft.account_name || null,
+      });
+    }
+    paymentDrafts.delete(ctx.chat.id);
+    await ctx.reply("Payment option saved ✅");
+    await showPaymentMethods(ctx);
+  } catch (err) {
+    console.error("Failed to save payment option:", err);
+    await ctx.reply("Could not save that payment option.");
+  }
 }
 
 async function handleAdminDraftText(
@@ -324,11 +397,6 @@ async function handleAdminDraftText(
         if (!text || skip)
           return ctx.reply("Please send a product name (required).");
         draft.name = text;
-        draft.step = "description";
-        adminDrafts.set(chatId, draft);
-        return ctx.reply("Description? (or /skip)");
-      case "description":
-        draft.description = skip ? null : text;
         draft.step = "price";
         adminDrafts.set(chatId, draft);
         return ctx.reply("Price in ETB? (numbers only)");
@@ -337,38 +405,21 @@ async function handleAdminDraftText(
         if (!price || Number.isNaN(price))
           return ctx.reply("Please send a valid price, e.g. 15000");
         draft.price = price;
-        draft.step = "stock";
-        adminDrafts.set(chatId, draft);
-        return ctx.reply("Stock quantity?");
-      }
-      case "stock": {
-        const stock = Number(text.replace(/[^\d]/g, ""));
-        if (Number.isNaN(stock))
-          return ctx.reply("Please send a valid whole number, e.g. 10");
-        draft.stock = stock;
         draft.step = "category";
         adminDrafts.set(chatId, draft);
-        return ctx.reply("Category? (e.g. Protein, Vitamins — or /skip)");
-      }
-      case "category":
-        draft.category = skip ? null : text;
-        draft.step = "colors";
-        adminDrafts.set(chatId, draft);
         return ctx.reply(
-          "Colors, comma-separated? (e.g. Black, White — or /skip)",
+          "Category? Send one short name, for example protein or vitamins.",
         );
-      case "colors":
-        draft.colors = skip
-          ? null
-          : text
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
+      }
+      case "category": {
+        const category = text.trim().toLowerCase().replace(/\s+/g, " ");
+        if (!category || skip)
+          return ctx.reply("Please send a category, for example protein.");
+        draft.category = category;
         draft.step = "image";
         adminDrafts.set(chatId, draft);
-        return ctx.reply(
-          "Send a product photo, or /skip to continue without one.",
-        );
+        return ctx.reply("Send the product image as a photo, or /skip.");
+      }
       case "image":
         if (skip) {
           await finalizeNewProduct(ctx, draft);
@@ -387,9 +438,6 @@ async function handleAdminDraftText(
         if (!text || skip) return ctx.reply("Name can't be empty.");
         updates.name = text;
         break;
-      case "description":
-        updates.description = skip ? null : text;
-        break;
       case "price": {
         const price = Number(text.replace(/[^\d.]/g, ""));
         if (!price || Number.isNaN(price))
@@ -397,23 +445,10 @@ async function handleAdminDraftText(
         updates.price = price;
         break;
       }
-      case "stock": {
-        const stock = Number(text.replace(/[^\d]/g, ""));
-        if (Number.isNaN(stock))
-          return ctx.reply("Please send a valid whole number.");
-        updates.stock = stock;
-        break;
-      }
       case "category":
-        updates.category = skip ? null : text;
-        break;
-      case "colors":
-        updates.colors = skip
+        updates.category = skip
           ? null
-          : text
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
+          : text.trim().toLowerCase().replace(/\s+/g, " ");
         break;
       case "image":
         return ctx.reply("Please send the new product image as a photo.");
@@ -573,11 +608,14 @@ bot.action(/^order_pay_([0-9a-f-]+)$/i, async (ctx) => {
 
   session.pendingOrderId = order.id;
   await persist(chatId, session);
+  const paymentInfo = order.payment_method_name
+    ? `${order.payment_method_name}\nAccount: ${order.payment_account_number}${order.payment_account_name ? `\nAccount name: ${order.payment_account_name}` : ""}`
+    : "Please contact the seller for the current payment account.";
   await ctx.reply(
     t(
       session,
-      `Order #${order.id.slice(0, 8)} — Total: ${order.total} ETB\n\nPlease pay to:\n${process.env.SELLER_PAYMENT_INFO}\n\nThen send your payment screenshot here. It will be sent to the admin for verification.`,
-      `ትዕዛዝ #${order.id.slice(0, 8)} — ጠቅላላ፦ ${order.total} ብር\n\nክፍያ ይፈጽሙ፦\n${process.env.SELLER_PAYMENT_INFO}\n\nከዚያ የክፍያ ስክሪንሾትዎን እዚህ ይላኩ። ለአስተዳዳሪ ማረጋገጫ ይላካል።`,
+      `Order #${order.id.slice(0, 8)} — Total: ${order.total} ETB\n\nPlease pay using:\n${paymentInfo}\n\nThen send your payment screenshot here. It will be sent to the admin for verification.`,
+      `ትዕዛዝ #${order.id.slice(0, 8)} — ጠቅላላ፦ ${order.total} ብር\n\nክፍያ ይፈጽሙ፦\n${paymentInfo}\n\nከዚያ የክፍያ ስክሪንሾትዎን እዚህ ይላኩ። ለአስተዳዳሪ ማረጋገጫ ይላካል።`,
     ),
   );
 });
@@ -787,23 +825,44 @@ async function resolveProductImage(
   if (!product.image_url) return null;
   if (/^https?:\/\//i.test(product.image_url)) return product.image_url;
 
-  // Telegram file IDs can be sent directly. Older records may contain a
-  // Telegram file path, which must be downloaded and re-uploaded as bytes.
-  if (!/[/.]/.test(product.image_url)) return product.image_url;
+  // Legacy Telegram file IDs are not durable product image storage. New
+  // uploads are saved as public Supabase URLs below, so skip old IDs instead
+  // of calling Telegram on every catalog view and logging a 400 error.
+  return null;
+}
 
-  try {
-    const fileLink = await ctx.telegram.getFileLink(product.image_url);
-    const response = await fetch(fileLink.href);
-    if (!response.ok)
-      throw new Error(`Image download failed: ${response.status}`);
-    return Input.fromBuffer(
-      Buffer.from(await response.arrayBuffer()),
-      `${product.id}.jpg`,
-    );
-  } catch (err) {
-    console.error(`Failed to resolve image for product ${product.id}:`, err);
-    return null;
+let productImageBucketReady: Promise<void> | null = null;
+
+async function uploadProductImage(
+  ctx: any,
+  fileId: string,
+  objectName: string,
+): Promise<string> {
+  if (!productImageBucketReady) {
+    productImageBucketReady = (async () => {
+      const { error } = await supabase.storage.createBucket("product-images", {
+        public: true,
+      });
+      if (error && !/already exists/i.test(error.message)) throw error;
+    })();
   }
+  await productImageBucketReady;
+
+  const fileLink = await ctx.telegram.getFileLink(fileId);
+  const response = await fetch(fileLink.href);
+  if (!response.ok)
+    throw new Error(`Product image download failed: ${response.status}`);
+
+  const { error } = await supabase.storage
+    .from("product-images")
+    .upload(objectName, Buffer.from(await response.arrayBuffer()), {
+      contentType: "image/jpeg",
+      upsert: true,
+    });
+  if (error) throw error;
+
+  return supabase.storage.from("product-images").getPublicUrl(objectName).data
+    .publicUrl;
 }
 
 async function showCategoryMenu(ctx: any, session: Session): Promise<void> {
@@ -924,7 +983,7 @@ async function showProductResults(
     ]);
     if (imageUrl) {
       await ctx.replyWithPhoto(imageUrl, {
-        caption: `${product.name}\n${product.description || ""}\n💰 ${product.price} ETB`,
+        caption: `${product.name}\n🏷 ${product.category}\n💰 ${product.price} ETB`,
         ...keyboard,
       });
     } else {
@@ -951,10 +1010,9 @@ async function showProductDetail(
   ctx: any,
   session: Session,
   productId: string,
-  selectedColor?: string | null,
 ): Promise<void> {
   const product = await getProduct(productId).catch(() => null);
-  if (!product || product.stock < 1) {
+  if (!product) {
     return ctx.reply(
       t(
         session,
@@ -964,45 +1022,20 @@ async function showProductDetail(
     );
   }
 
-  const availableColors = Array.isArray(product.colors)
-    ? product.colors.filter(Boolean)
-    : product.color
-      ? [product.color]
-      : [];
-
-  const colorLine = availableColors.length
-    ? `🎨 ${t(session, "Colors", "ቀለሞች")}: ${availableColors.join(", ")}`
-    : t(session, "🎨 Color: not specified", "🎨 ቀለም: አልተገለጸም");
-
   const buttons: any[] = [
     [Markup.button.callback(t(session, "🛒 My Cart", "🛒 ጋሪዬ"), "view_cart")],
   ];
-  if (availableColors.length > 0) {
-    for (let index = 0; index < availableColors.length; index++) {
-      const color = availableColors[index];
-      buttons.push([
-        Markup.button.callback(
-          `${color}${selectedColor === color ? " ✅" : ""}`,
-          `color_${compactProductToken(product.id)}_${index}`,
-        ),
-      ]);
-    }
-  }
-
-  const chosenColor =
-    selectedColor || product.color || availableColors[0] || null;
-  const chosenIndex = chosenColor ? availableColors.indexOf(chosenColor) : 0;
   buttons.push([
     Markup.button.callback(
       t(session, "🛒 Add to cart", "🛒 ወደ ጋሪ ጨምር"),
-      `add_selected_${compactProductToken(product.id)}_${chosenIndex >= 0 ? chosenIndex : 0}`,
+      `choose_qty_${compactProductToken(product.id)}_0`,
     ),
   ]);
   buttons.push([
     Markup.button.callback(t(session, "🔙 Back", "🔙 ተመለስ"), "back_categories"),
   ]);
 
-  const detailText = `${product.name}\n\n${product.description || t(session, "Quality supplement for your training routine.", "ለስልጠናዎ መደበኛ ሂደት ጥራት ያለው ማሟያ።")}\n💰 ${t(session, "Price", "ዋጋ")}: ${product.price} ETB\n📦 ${t(session, "Stock", "ክምችት")}: ${product.stock}\n${colorLine}`;
+  const detailText = `${product.name}\n\n${t(session, "Price", "ዋጋ")}: ${product.price} ETB\n🏷 ${product.category}`;
   const imageUrl = await resolveProductImage(ctx, product);
   if (imageUrl) {
     await ctx.replyWithPhoto(imageUrl, {
@@ -1037,8 +1070,8 @@ bot.action(/^cat_(\d+)(?:_(\d+))?$/, async (ctx) => {
     return ctx.reply(
       t(
         session,
-        "Nothing in stock in that category right now.",
-        "በዚህ ምድብ ውስጥ አሁን ምንም ክምችት የለም።",
+        "Nothing in this category right now.",
+        "በዚህ ምድብ ውስጥ አሁን ምንም ምርት የለም።",
       ),
     );
   }
@@ -1054,13 +1087,13 @@ bot.action(/^cat_(\d+)(?:_(\d+))?$/, async (ctx) => {
       [
         Markup.button.callback(
           `🛒 Add ${product.name} — ${product.price} ETB`,
-          `add_selected_${compactProductToken(product.id)}_0`,
+          `choose_qty_${compactProductToken(product.id)}_0`,
         ),
       ],
     ]);
     if (imageUrl) {
       await ctx.replyWithPhoto(imageUrl, {
-        caption: `${product.name}\n${product.description || ""}\n💰 ${product.price} ETB`,
+        caption: `${product.name}\n🏷 ${product.category}\n💰 ${product.price} ETB`,
         ...keyboard,
       });
     } else {
@@ -1171,56 +1204,63 @@ bot.action(/prod_(.+)/, async (ctx) => {
   return showProductDetail(ctx, session, restoreProductId(ctx.match[1]));
 });
 
-bot.action(/color_(.+)_(\d+)/, async (ctx) => {
+bot.action(/choose_qty_(.+)_(\d+)/, async (ctx) => {
   const session = await getSession(ctx.chat!.id);
   await ctx.answerCbQuery();
   const productId = restoreProductId(ctx.match[1]);
   const product = await getProduct(productId).catch(() => null);
-  const availableColors = Array.isArray(product?.colors)
-    ? product.colors.filter(Boolean)
-    : product?.color
-      ? [product.color]
-      : [];
-  const selectedColor = availableColors[Number(ctx.match[2])] || null;
-  return showProductDetail(ctx, session, productId, selectedColor);
+  if (!product)
+    return ctx.reply(t(session, "Product not found.", "ምርቱ አልተገኘም።"));
+
+  const maxQuantity = 10;
+  const quantityButtons: any[] = [];
+  for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
+    quantityButtons.push(
+      Markup.button.callback(
+        `${quantity}`,
+        `add_selected_${compactProductToken(product.id)}_${ctx.match[2]}_${quantity}`,
+      ),
+    );
+  }
+  const rows: any[][] = [];
+  for (let index = 0; index < quantityButtons.length; index += 5) {
+    rows.push(quantityButtons.slice(index, index + 5));
+  }
+  rows.push([
+    Markup.button.callback(
+      t(session, "🔙 Back", "🔙 ተመለስ"),
+      `prod_${compactProductToken(product.id)}`,
+    ),
+  ]);
+  return ctx.reply(
+    t(
+      session,
+      `How many ${product.name} would you like?`,
+      `${product.name} ስንት ይፈልጋሉ?`,
+    ),
+    Markup.inlineKeyboard(rows),
+  );
 });
 
-bot.action(/add_selected_(.+)_(\d+)/, async (ctx) => {
+bot.action(/add_selected_([^_]+)_(\d+)(?:_(\d+))?/, async (ctx) => {
   const chatId = ctx.chat!.id;
   const session = await getSession(chatId);
   await ctx.answerCbQuery();
 
   const productId = restoreProductId(ctx.match[1]);
   const product = await getProduct(productId).catch(() => null);
-  if (!product || product.stock < 1) {
-    return ctx.reply(
-      t(
-        session,
-        "Sorry, that's out of stock right now.",
-        "ይቅርታ፣ አሁን ክምችት የለውም።",
-      ),
-    );
+  if (!product) {
+    return ctx.reply(t(session, "Product not found.", "ምርቱ አልተገኘም።"));
   }
-
-  const availableColors = Array.isArray(product.colors)
-    ? product.colors.filter(Boolean)
-    : product.color
-      ? [product.color]
-      : [];
-  const chosenIndex = Number(ctx.match[2]) || 0;
-  const selectedColor = availableColors[chosenIndex] || product.color || null;
-
-  const existing = session.cart.find(
-    (c) => c.product_id === product.id && c.color === selectedColor,
-  );
-  if (existing) existing.quantity += 1;
+  const requestedQuantity = Math.max(1, Number(ctx.match[3]) || 1);
+  const existing = session.cart.find((c) => c.product_id === product.id);
+  if (existing) existing.quantity += requestedQuantity;
   else
     session.cart.push({
       product_id: product.id,
       name: product.name,
       price: product.price,
-      quantity: 1,
-      color: selectedColor,
+      quantity: requestedQuantity,
     });
   await persist(chatId, session);
 
@@ -1258,8 +1298,8 @@ bot.action(/add_selected_(.+)_(\d+)/, async (ctx) => {
   await ctx.reply(
     t(
       session,
-      `Added ${product.name}${selectedColor ? ` (${selectedColor})` : ""} ✅\n\nYou may also like: ${related.map((item) => item.name).join(", ") || "more products"}.`,
-      `${product.name}${selectedColor ? ` (${selectedColor})` : ""} ታክሏል ✅\n\nእንዲሁም ሊያስወው የሚችሉ ምርቶች፦ ${related.map((item) => item.name).join(", ") || "ተጨማሪ ምርቶች"}.`,
+      `Added ${product.name} ✅\n\nYou may also like: ${related.map((item) => item.name).join(", ") || "more products"}.`,
+      `${product.name} ታክሏል ✅\n\nእንዲሁም ሊያስወው የሚችሉ ምርቶች፦ ${related.map((item) => item.name).join(", ") || "ተጨማሪ ምርቶች"}.`,
     ),
     Markup.inlineKeyboard(buttons),
   );
@@ -1416,6 +1456,47 @@ bot.action("seller_orders", async (ctx) => {
   await showSellerOrders(ctx);
 });
 
+bot.action("seller_payments", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showPaymentMethods(ctx);
+});
+
+bot.action("payment_add", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  paymentDrafts.set(ctx.chat!.id, { mode: "create", step: "name" });
+  await ctx.reply("Payment name (for example Telebirr or CBE):");
+});
+
+bot.action(/payment_edit_(.+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const method = (await listPaymentMethods(false)).find(
+    (item) => item.id === ctx.match[1],
+  );
+  if (!method) return ctx.reply("Payment option not found.");
+  paymentDrafts.set(ctx.chat!.id, {
+    mode: "edit",
+    id: method.id,
+    step: "name",
+    name: method.name,
+    account_number: method.account_number,
+    account_name: method.account_name,
+  });
+  await ctx.reply(
+    `${paymentMethodText(method)}\n\nSend the new payment name, or /skip to keep it.`,
+  );
+});
+
+bot.action(/payment_delete_(.+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await deletePaymentMethod(ctx.match[1]);
+  await ctx.reply("Payment option deactivated ✅");
+  await showPaymentMethods(ctx);
+});
+
 bot.action("admin_add", async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
@@ -1441,32 +1522,26 @@ bot.action(/admin_edit_(.+)/, async (ctx) => {
   await ctx.reply(adminEditMenuText(draft), adminEditMenuKeyboard(product.id));
 });
 
-bot.action(
-  /admin_field_(name|description|price|stock|category|colors|image)_(.+)/,
-  async (ctx) => {
-    if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
-    await ctx.answerCbQuery();
-    const field = ctx.match[1] as AdminDraftField;
-    const productId = restoreProductId(ctx.match[2]);
-    const draft = adminDrafts.get(ctx.chat!.id);
-    if (!draft || draft.productId !== productId)
-      return ctx.reply("Session expired — tap /menu to start again.");
+bot.action(/admin_field_(name|price|category|image)_(.+)/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const field = ctx.match[1] as AdminDraftField;
+  const productId = restoreProductId(ctx.match[2]);
+  const draft = adminDrafts.get(ctx.chat!.id);
+  if (!draft || draft.productId !== productId)
+    return ctx.reply("Session expired — tap /menu to start again.");
 
-    draft.step = field;
-    adminDrafts.set(ctx.chat!.id, draft);
+  draft.step = field;
+  adminDrafts.set(ctx.chat!.id, draft);
 
-    const prompts: Record<AdminDraftField, string> = {
-      name: "Send the new product name.",
-      description: "Send the new description (or /skip to clear it).",
-      price: "Send the new price (numbers only, in ETB).",
-      stock: "Send the new stock quantity.",
-      category: "Send the new category (or /skip to clear it).",
-      colors: "Send the colors, comma-separated (or /skip to clear).",
-      image: "Send the new product image as a photo.",
-    };
-    await ctx.reply(prompts[field]);
-  },
-);
+  const prompts: Record<AdminDraftField, string> = {
+    name: "Send the new product name.",
+    price: "Send the new price (numbers only, in ETB).",
+    category: "Send the new category in lowercase.",
+    image: "Send the new product image as a photo.",
+  };
+  await ctx.reply(prompts[field]);
+});
 
 bot.action(/^admin_delete_confirm_(.+)$/, async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
@@ -1543,8 +1618,60 @@ async function proceedToCheckout(
   }
   if (!session.customerPhone) return askPhone(ctx, session);
   if (!session.deliveryLocation) return askDeliveryChoice(ctx, session);
-  return finalizeOrder(chatId, session, customerName);
+  return askPaymentMethod(ctx, session, customerName);
 }
+
+async function askPaymentMethod(
+  ctx: any,
+  session: Session,
+  customerName: string,
+): Promise<void> {
+  const methods = await listPaymentMethods(true);
+  if (methods.length === 0) {
+    return ctx.reply(
+      t(
+        session,
+        "Payment is temporarily unavailable. Please contact the seller.",
+        "ክፍያ ለጊዜው አይገኝም። እባክዎ ሻጩን ያነጋግሩ።",
+      ),
+    );
+  }
+  session.pendingStep = "awaiting_payment_method";
+  await persist(ctx.chat.id, session);
+  await ctx.reply(
+    t(session, "Choose a payment method:", "የክፍያ ዘዴ ይምረጡ፦"),
+    Markup.inlineKeyboard(
+      methods.map((method) => [
+        Markup.button.callback(
+          `${method.name} (${method.account_number})`,
+          `payment_choose_${method.id}`,
+        ),
+      ]),
+    ),
+  );
+}
+
+bot.action(/payment_choose_(.+)/, async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const session = await getSession(chatId);
+  await ctx.answerCbQuery();
+  const method = (await listPaymentMethods(true)).find(
+    (item) => item.id === ctx.match[1],
+  );
+  if (!method) {
+    return ctx.reply(
+      t(
+        session,
+        "That payment method is unavailable. Please choose again.",
+        "ያ የክፍያ ዘዴ አይገኝም። እባክዎ እንደገና ይምረጡ።",
+      ),
+    );
+  }
+  session.pendingStep = null;
+  await persist(chatId, session);
+  const customerName = ctx.from.first_name || ctx.from.username || "Customer";
+  return finalizeOrder(chatId, session, customerName, method);
+});
 
 async function askDeliveryChoice(ctx: any, session: Session): Promise<void> {
   session.pendingStep = "awaiting_delivery_choice";
@@ -1587,6 +1714,7 @@ async function finalizeOrder(
   chatId: number,
   session: Session,
   customerName: string,
+  paymentMethod: PaymentMethod,
 ): Promise<void> {
   const subtotal = session.cart.reduce(
     (sum, i) => sum + i.price * i.quantity,
@@ -1598,6 +1726,7 @@ async function finalizeOrder(
     customerPhone: session.customerPhone,
     deliveryLocation: session.deliveryLocation,
     deliveryFee,
+    paymentMethod,
   });
 
   session.pendingOrderId = order.id;
@@ -1620,8 +1749,8 @@ async function finalizeOrder(
 
   const payMsg = t(
     session,
-    `Order created ✅\n\n${breakdown}\n\nPlease pay to:\n${process.env.SELLER_PAYMENT_INFO}\n\nThen send a screenshot of the payment right here to confirm your order.\n\nCheck status anytime with /orders. Questions? Call: ${process.env.SELLER_PHONE_NUMBER}`,
-    `ትዕዛዝዎ ተፈጥሯል ✅\n\n${breakdown}\n\nክፍያ ይፈጽሙ፦\n${process.env.SELLER_PAYMENT_INFO}\n\nከዚያ የክፍያ ደረሰኝዎን ስክሪንሾት እዚሁ ይላኩ።\n\nደረጃውን በማንኛውም ጊዜ /orders ይመልከቱ። ጥያቄ ካለዎት ይደውሉ፦ ${process.env.SELLER_PHONE_NUMBER}`,
+    `Order created ✅\n\n${breakdown}\n\nPay using ${paymentMethod.name}:\nAccount: ${paymentMethod.account_number}${paymentMethod.account_name ? `\nAccount name: ${paymentMethod.account_name}` : ""}${paymentMethod.instructions ? `\n${paymentMethod.instructions}` : ""}\n\nThen send a screenshot of the payment right here to confirm your order.\n\nCheck status anytime with /orders. Questions? Call: ${process.env.SELLER_PHONE_NUMBER}`,
+    `ትዕዛዝዎ ተፈጥሯል ✅\n\n${breakdown}\n\nበ ${paymentMethod.name} ይክፈሉ፦\nየሂሳብ ቁጥር፦ ${paymentMethod.account_number}${paymentMethod.account_name ? `\nየሂሳቡ ባለቤት፦ ${paymentMethod.account_name}` : ""}${paymentMethod.instructions ? `\n${paymentMethod.instructions}` : ""}\n\nከዚያ የክፍያ ደረሰኝዎን ስክሪንሾት እዚህ ይላኩ።\n\nደረጃውን በማንኛውም ጊዜ /orders ይመልከቱ። ጥያቄ ካለዎት ይደውሉ፦ ${process.env.SELLER_PHONE_NUMBER}`,
   );
 
   await bot.telegram.sendMessage(chatId, payMsg, Markup.removeKeyboard());
@@ -1757,7 +1886,7 @@ bot.action(/delivery_(addis|outside)/, async (ctx) => {
     session.pendingStep = null;
     await persist(chatId, session);
     const customerName = ctx.from.first_name || ctx.from.username || "Customer";
-    return finalizeOrder(chatId, session, customerName);
+    return askPaymentMethod(ctx, session, customerName);
   }
 
   session.pendingStep = "awaiting_delivery_area";
@@ -1791,6 +1920,12 @@ bot.on("text", async (ctx) => {
   if (isSeller(ctx.from.id)) {
     const sellerHandled = await handleSellerKeyboardText(ctx, text);
     if (sellerHandled) return;
+
+    const paymentDraft = paymentDrafts.get(chatId);
+    if (paymentDraft) {
+      await handlePaymentDraftText(ctx, paymentDraft, text);
+      return;
+    }
 
     const draft = adminDrafts.get(chatId);
     if (draft && draft.step) {
@@ -1846,7 +1981,7 @@ bot.on("text", async (ctx) => {
     session.pendingStep = null;
     await persist(chatId, session);
     try {
-      await finalizeOrder(chatId, session, customerName);
+      await askPaymentMethod(ctx, session, customerName);
     } catch (err) {
       console.error(`Failed to finalize order for chat ${chatId}:`, err);
       return ctx.reply(friendlyErrorText(session));
@@ -2050,13 +2185,18 @@ bot.on("photo", async (ctx) => {
     try {
       const photos = ctx.message.photo;
       const fileId = photos[photos.length - 1].file_id;
+      const imageUrl = await uploadProductImage(
+        ctx,
+        fileId,
+        `product-${chatId}-${Date.now()}.jpg`,
+      );
 
       if (adminDraft.mode === "create") {
-        adminDraft.image_url = fileId;
+        adminDraft.image_url = imageUrl;
         await finalizeNewProduct(ctx, adminDraft);
       } else if (adminDraft.productId) {
         const updated = await updateProduct(adminDraft.productId, {
-          image_url: fileId,
+          image_url: imageUrl,
         });
         const refreshed = refreshDraftFromProduct(updated);
         adminDrafts.set(chatId, refreshed);
@@ -2189,12 +2329,38 @@ async function updateSellerOrderMessage(
   }
 }
 
+async function deletePaymentScreenshot(
+  screenshotUrl?: string | null,
+): Promise<void> {
+  if (!screenshotUrl) return;
+
+  const marker = "/storage/v1/object/public/payment-screenshots/";
+  const markerIndex = screenshotUrl.indexOf(marker);
+  if (markerIndex < 0) {
+    console.warn("Could not determine payment screenshot storage path.");
+    return;
+  }
+
+  const path = decodeURIComponent(
+    screenshotUrl.slice(markerIndex + marker.length),
+  );
+  const { error } = await supabase.storage
+    .from("payment-screenshots")
+    .remove([path]);
+  if (error) throw error;
+}
+
 bot.action(/confirm_(.+)/, async (ctx) => {
   if (String(ctx.from.id) !== String(process.env.SELLER_TELEGRAM_ID))
     return ctx.answerCbQuery("Not authorized");
   try {
     const orderId = ctx.match[1];
     const order = await setOrderStatus(orderId, "confirmed");
+    try {
+      await deletePaymentScreenshot(order.screenshot_url);
+    } catch (err) {
+      console.error("Failed to delete confirmed payment screenshot:", err);
+    }
     await ctx.answerCbQuery("Confirmed");
     await updateSellerOrderMessage(ctx, "✅ CONFIRMED");
     const custSession = await getSession(Number(order.customer_telegram_id));
@@ -2256,6 +2422,11 @@ async function rejectOrderWithOptionalReason(
 ): Promise<void> {
   try {
     const order = await setOrderStatus(orderId, "rejected");
+    try {
+      await deletePaymentScreenshot(order.screenshot_url);
+    } catch (err) {
+      console.error("Failed to delete rejected payment screenshot:", err);
+    }
     const reasonText = reason?.trim();
     const reasonLine = reasonText ? `\nReason: ${reasonText}` : "";
 

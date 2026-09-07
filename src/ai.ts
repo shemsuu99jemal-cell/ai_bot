@@ -364,8 +364,7 @@ export async function handleMessage(
                 id: p.id,
                 name: p.name,
                 price: p.price,
-                stock: p.stock,
-                description: p.description,
+                category: p.category,
               })),
             ),
           } as any);
@@ -378,11 +377,11 @@ export async function handleMessage(
           pendingAction = { action: "show_categories" };
         } else if (call.function.name === "add_to_cart") {
           const product = await getProduct(args.product_id);
-          if (!product || product.stock < args.quantity) {
+          if (!product) {
             session.history.push({
               role: "tool",
               tool_call_id: call.id,
-              content: JSON.stringify({ error: "Not enough stock available." }),
+              content: JSON.stringify({ error: "Product not found." }),
             } as any);
           } else {
             const existing = session.cart.find(

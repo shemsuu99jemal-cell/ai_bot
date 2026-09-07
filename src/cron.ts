@@ -1,9 +1,18 @@
 import cron from "node-cron";
 import type { Telegraf } from "telegraf";
-import { getPendingVerificationOrders, incrementReminder } from "./db";
+import {
+  deleteExpiredUnpaidOrders,
+  getPendingVerificationOrders,
+  incrementReminder,
+} from "./db";
 import { sendSms } from "./sms";
 
 export async function runEscalationCycle(bot: Telegraf): Promise<void> {
+  const deleted = await deleteExpiredUnpaidOrders(10);
+  if (deleted > 0) {
+    console.log(`Deleted ${deleted} unpaid order(s) older than 10 minutes.`);
+  }
+
   const stale = await getPendingVerificationOrders(15); // older than 15 min
 
   for (const order of stale) {

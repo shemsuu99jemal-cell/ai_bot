@@ -3,13 +3,8 @@ export type Language = "en" | "am";
 export interface Product {
   id: string;
   name: string;
-  description?: string;
   price: number;
-  stock: number;
-  aliases?: string[];
   category?: string | null;
-  color?: string | null;
-  colors?: string[] | null;
   image_url?: string | null;
 }
 
@@ -38,6 +33,10 @@ export interface Order {
   total: number;
   status: OrderStatus;
   screenshot_url?: string | null;
+  payment_method_id?: string | null;
+  payment_method_name?: string | null;
+  payment_account_number?: string | null;
+  payment_account_name?: string | null;
   rejection_reason?: string | null;
   reminder_count?: number;
   created_at?: string;
@@ -48,6 +47,7 @@ export type PendingStep =
   | "awaiting_phone"
   | "awaiting_delivery_choice"
   | "awaiting_delivery_area"
+  | "awaiting_payment_method"
   | "awaiting_reject_phone"
   | null;
 
@@ -60,6 +60,16 @@ export interface Session {
   deliveryLocation?: string | null;
   deliveryFee?: number;
   pendingStep?: PendingStep;
+}
+
+export interface PaymentMethod {
+  id: string;
+  name: string;
+  account_number: string;
+  account_name?: string | null;
+  instructions?: string | null;
+  is_active: boolean;
+  created_at?: string;
 }
 
 export type AiResult =
