@@ -324,11 +324,11 @@ export async function saveStoreAddress(data: {
   return saved as StoreAddress;
 }
 
-export async function deleteStoreAddress(): Promise<void> {
+export async function deleteStoreAddress(id: string): Promise<void> {
   const { error } = await supabase
     .from("store_addresses")
     .delete()
-    .neq("id", "");
+    .eq("id", id);
   if (error) throw error;
 }
 

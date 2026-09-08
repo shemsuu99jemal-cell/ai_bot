@@ -1975,16 +1975,25 @@ bot.action(/^address_field_(address|description|image)$/, async (ctx) => {
 bot.action("address_delete", async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
-  const address = await getStoreAddress();
-  await deleteStoreAddress();
-  const imagePath = storagePathFromPublicUrl(address?.image_url);
-  if (imagePath) {
-    const { error } = await supabase.storage
-      .from("product-images")
-      .remove([imagePath]);
-    if (error) console.warn("Could not remove deleted address image:", error);
+  try {
+    const address = await getStoreAddress();
+    if (!address) return ctx.reply("No store address is configured.");
+
+    await deleteStoreAddress(address.id);
+    const imagePath = storagePathFromPublicUrl(address.image_url);
+    if (imagePath) {
+      const { error } = await supabase.storage
+        .from("product-images")
+        .remove([imagePath]);
+      if (error) console.warn("Could not remove deleted address image:", error);
+    }
+    await ctx.reply("Store address removed ✅", sellerReplyKeyboard());
+  } catch (err) {
+    console.error("Failed to remove store address:", err);
+    await ctx.reply(
+      "Could not remove the address. Please check that the store_addresses table migration has been run, then try again.",
+    );
   }
-  await ctx.reply("Store address removed ✅", sellerReplyKeyboard());
 });
 
 bot.action("payment_add", async (ctx) => {
