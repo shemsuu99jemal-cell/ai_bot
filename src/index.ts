@@ -863,7 +863,7 @@ async function showCartText(ctx: any, session: Session): Promise<void> {
     Markup.inlineKeyboard([
       [
         Markup.button.callback(
-          t(session, "✅ Checkout", "✅ ይክፈሉ"),
+          t(session, "💳 Pay", "💳 ይክፈሉ"),
           "do_checkout",
         ),
       ],
@@ -1269,7 +1269,7 @@ bot.command("cart", async (ctx) => {
       ],
       [
         Markup.button.callback(
-          t(session, "✅ Checkout", "✅ ይክፈሉ"),
+          t(session, "💳 Pay", "💳 ይክፈሉ"),
           "do_checkout",
         ),
       ],
@@ -1659,7 +1659,6 @@ bot.action(/add_selected_([^_]+)_(\d+)(?:_(\d+))?/, async (ctx) => {
     });
   await persist(chatId, session);
 
-  const related = await getRelatedProducts(product.id, 2).catch(() => []);
   const buttons: any[] = [
     [
       Markup.button.callback(
@@ -1675,26 +1674,17 @@ bot.action(/add_selected_([^_]+)_(\d+)(?:_(\d+))?/, async (ctx) => {
     ],
     [
       Markup.button.callback(
-        t(session, "✅ Checkout", "✅ ይክፈሉ"),
+        t(session, "💳 Pay", "💳 ይክፈሉ"),
         "do_checkout",
       ),
     ],
   ];
 
-  if (related.length > 0) {
-    buttons.push([
-      Markup.button.callback(
-        t(session, "✨ You may also like", "✨ እንዲሁም ይመልከቱ"),
-        `prod_${compactProductToken(related[0].id)}`,
-      ),
-    ]);
-  }
-
   await ctx.reply(
     t(
       session,
-      `Added ${product.name} ✅\n\nYou may also like: ${related.map((item) => item.name).join(", ") || "more products"}.`,
-      `${product.name} ታክሏል ✅\n\nእንዲሁም ሊያስወው የሚችሉ ምርቶች፦ ${related.map((item) => item.name).join(", ") || "ተጨማሪ ምርቶች"}.`,
+      `Added ${product.name} ✅`,
+      `${product.name} ታክሏል ✅`,
     ),
     Markup.inlineKeyboard(buttons),
   );
@@ -1714,7 +1704,7 @@ bot.action("view_cart", async (ctx) => {
   const buttons: any[] = [
     [
       Markup.button.callback(
-        t(session, "✅ Checkout", "✅ ይክፈሉ"),
+        t(session, "💳 Pay", "💳 ይክፈሉ"),
         "do_checkout",
       ),
     ],
@@ -1778,7 +1768,7 @@ bot.action(/remove_cart_(.+)/, async (ctx) => {
         ],
         [
           Markup.button.callback(
-            t(session, "✅ Checkout later", "✅ በኋላ ክፍያ ያድርጉ"),
+            t(session, "💳 Pay later", "💳 በኋላ ክፍያ ያድርጉ"),
             "do_checkout",
           ),
         ],
@@ -1801,7 +1791,7 @@ bot.action(/remove_cart_(.+)/, async (ctx) => {
       ],
       [
         Markup.button.callback(
-          t(session, "✅ Checkout", "✅ ይክፈሉ"),
+          t(session, "💳 Pay", "💳 ይክፈሉ"),
           "do_checkout",
         ),
       ],
