@@ -493,15 +493,44 @@ async function showSellerOrders(ctx: any): Promise<void> {
     return ctx.reply("No orders yet.", sellerReplyKeyboard());
   }
 
-  const lines = orders.map((order) => {
-    const created = order.created_at
-      ? new Date(order.created_at).toLocaleDateString()
-      : "n/a";
-    return `#${String(order.id).slice(0, 8)} • ${order.customer_name || "Customer"} • ${order.total} ETB • ${order.status} • ${created}`;
-  });
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfYesterday = new Date(startOfToday);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+
+  const groups = new Map<string, string[]>();
+  for (const order of orders) {
+    const createdAt = order.created_at ? new Date(order.created_at) : null;
+    const group =
+      createdAt && createdAt >= startOfToday
+        ? "Today"
+        : createdAt && createdAt >= startOfYesterday
+          ? "Yesterday"
+          : "Older orders";
+    const created = createdAt
+      ? createdAt.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        })
+      : "Date unavailable";
+    const details = [
+      `#${String(order.id).slice(0, 8)} — ${order.customer_name || "Customer"}`,
+      `📞 ${order.customer_phone || "Phone not shared"}`,
+      `💰 ${order.total} ETB • ${order.status}`,
+      `📍 ${order.delivery_location || "Addis Ababa"} • ${created}`,
+    ].join("\n");
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(details);
+  }
+
+  const sections = Array.from(groups.entries()).map(
+    ([header, groupOrders]) => `📅 ${header}\n\n${groupOrders.join("\n\n")}`,
+  );
 
   await ctx.reply(
-    "🧾 Recent Orders\n\n" + lines.join("\n"),
+    "🧾 Recent Orders\n\n" + sections.join("\n\n"),
     sellerReplyKeyboard(),
   );
 }
