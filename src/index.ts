@@ -2013,9 +2013,11 @@ async function proceedToCheckout(
       ),
     );
   }
-  if (!session.customerPhone) return askPhone(ctx, session);
-  if (!session.deliveryLocation) return askDeliveryChoice(ctx, session);
-  return askPaymentMethod(ctx, session, customerName);
+  session.customerPhone = null;
+  session.deliveryLocation = null;
+  session.deliveryFee = 0;
+  await persist(chatId, session);
+  return askPhone(ctx, session);
 }
 
 async function askPaymentMethod(

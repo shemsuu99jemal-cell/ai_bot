@@ -64,6 +64,10 @@ create table if not exists conversations (
   history jsonb default '[]',
   cart jsonb default '[]',           -- [{ product_id, name, price, quantity }]
   pending_order_id uuid,             -- set after checkout, cleared once screenshot is attached
+  customer_phone text,
+  delivery_location text,
+  delivery_fee numeric default 0,
+  pending_step text,
   updated_at timestamptz default now()
 );
 

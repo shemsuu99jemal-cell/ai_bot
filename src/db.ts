@@ -490,8 +490,8 @@ export async function loadSession(chatId: number): Promise<Session> {
     cart: data.cart || [],
     pendingOrderId: data.pending_order_id || null,
     customerPhone: data.customer_phone || null,
-    deliveryLocation: null,
-    deliveryFee: 0,
+    deliveryLocation: data.delivery_location || null,
+    deliveryFee: Number(data.delivery_fee) || 0,
     pendingStep: (data.pending_step as any) || null,
   };
 }
@@ -507,6 +507,8 @@ export async function saveSession(
     cart: session.cart,
     pending_order_id: session.pendingOrderId,
     customer_phone: session.customerPhone || null,
+    delivery_location: session.deliveryLocation || null,
+    delivery_fee: session.deliveryFee || 0,
     pending_step: session.pendingStep || null,
     updated_at: new Date().toISOString(),
   });
