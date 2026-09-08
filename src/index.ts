@@ -423,17 +423,15 @@ async function showSellerHelpTopic(
 }
 
 async function showPaymentMethods(ctx: any): Promise<void> {
-  const methods = await listPaymentMethods(false);
+  const methods = await listPaymentMethods(true);
   const rows = methods.flatMap((method) => [
     [
       Markup.button.callback(
-        `${method.is_active ? "✅" : "⏸️"} ${method.name} — ${method.account_number}`,
+        `✅ ${method.name} — ${method.account_number}`,
         `payment_edit_${method.id}`,
       ),
     ],
-    method.is_active
-      ? [Markup.button.callback("Deactivate", `payment_delete_${method.id}`)]
-      : [],
+    [Markup.button.callback("🗑 Remove", `payment_delete_${method.id}`)],
   ]);
   rows.push([Markup.button.callback("➕ Add payment option", "payment_add")]);
   rows.push([Markup.button.callback("⬅️ Dashboard", "seller_dashboard")]);
@@ -657,23 +655,24 @@ async function handlePaymentDraftText(
 ): Promise<void> {
   const value = text.trim();
   if (draft.step === "name") {
-    if (value !== "/skip") draft.name = value;
-    if (!draft.name) return ctx.reply("Payment name is required.");
+    if (!value) return ctx.reply("Payment name is required. Please enter it.");
+    draft.name = value;
     draft.step = "account_number";
     paymentDrafts.set(ctx.chat.id, draft);
-    return ctx.reply(
-      "Send the Telebirr or CBE account number, or /skip to keep it.",
-    );
+    return ctx.reply("Give me the account number:");
   }
   if (draft.step === "account_number") {
-    if (value !== "/skip") draft.account_number = value;
-    if (!draft.account_number) return ctx.reply("Account number is required.");
+    if (!value)
+      return ctx.reply("Account number is required. Please enter it.");
+    draft.account_number = value;
     draft.step = "account_name";
     paymentDrafts.set(ctx.chat.id, draft);
-    return ctx.reply("Account holder name, or /skip if not needed.");
+    return ctx.reply("Give me the account holder name:");
   }
 
-  if (value !== "/skip") draft.account_name = value;
+  if (!value)
+    return ctx.reply("Account holder name is required. Please enter it.");
+  draft.account_name = value;
   try {
     if (draft.mode === "create") {
       await createPaymentMethod({
@@ -689,7 +688,7 @@ async function handlePaymentDraftText(
       });
     }
     paymentDrafts.delete(ctx.chat.id);
-    await ctx.reply("Payment option saved ✅");
+    await ctx.reply("Payment option saved ✅", Markup.removeKeyboard());
     await showPaymentMethods(ctx);
   } catch (err) {
     console.error("Failed to save payment option:", err);
@@ -1880,16 +1879,14 @@ bot.action(/payment_edit_(.+)/, async (ctx) => {
     account_number: method.account_number,
     account_name: method.account_name,
   });
-  await ctx.reply(
-    `${paymentMethodText(method)}\n\nSend the new payment name, or /skip to keep it.`,
-  );
+  await ctx.reply(`${paymentMethodText(method)}\n\nSend the new payment name:`);
 });
 
 bot.action(/payment_delete_(.+)/, async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
   await deletePaymentMethod(ctx.match[1]);
-  await ctx.reply("Payment option deactivated ✅");
+  await ctx.reply("Payment option removed from customer payment choices ✅");
   await showPaymentMethods(ctx);
 });
 
