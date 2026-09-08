@@ -1954,6 +1954,8 @@ bot.action(/^address_field_(address|description|image)$/, async (ctx) => {
   const existing = await getStoreAddress();
   if (!existing) return beginAddressDraft(ctx);
 
+  adminDrafts.delete(ctx.chat!.id);
+  paymentDrafts.delete(ctx.chat!.id);
   const step = ctx.match[1] as AddressDraft["step"];
   addressDrafts.set(ctx.chat!.id, {
     mode: "edit",
@@ -2443,26 +2445,40 @@ bot.on("text", async (ctx) => {
       if (addressDraft.mode === "edit") {
         if (addressDraft.step === "address") {
           if (!text.trim()) return ctx.reply("Address is required.");
-          await saveStoreAddress({
-            address: text.trim(),
-            description: addressDraft.description,
-            image_url: addressDraft.image_url,
-          });
-          addressDrafts.delete(chatId);
-          return ctx.reply("Store address updated ✅", sellerReplyKeyboard());
+          try {
+            await saveStoreAddress({
+              address: text.trim(),
+              description: addressDraft.description,
+              image_url: addressDraft.image_url,
+            });
+            addressDrafts.delete(chatId);
+            return ctx.reply("Store address updated ✅", sellerReplyKeyboard());
+          } catch (err) {
+            console.error("Failed to update store address:", err);
+            return ctx.reply(
+              "Could not save the address. Please check that the store_addresses table migration has been run, then try again.",
+            );
+          }
         }
         if (addressDraft.step === "description") {
-          await saveStoreAddress({
-            address: addressDraft.address!,
-            description:
-              text.trim().toLowerCase() === "/skip" ? null : text.trim(),
-            image_url: addressDraft.image_url,
-          });
-          addressDrafts.delete(chatId);
-          return ctx.reply(
-            "Address description updated ✅",
-            sellerReplyKeyboard(),
-          );
+          try {
+            await saveStoreAddress({
+              address: addressDraft.address!,
+              description:
+                text.trim().toLowerCase() === "/skip" ? null : text.trim(),
+              image_url: addressDraft.image_url,
+            });
+            addressDrafts.delete(chatId);
+            return ctx.reply(
+              "Address description updated ✅",
+              sellerReplyKeyboard(),
+            );
+          } catch (err) {
+            console.error("Failed to update address description:", err);
+            return ctx.reply(
+              "Could not save the address description. Please try again.",
+            );
+          }
         }
         return ctx.reply("Please send the new place photo.");
       }
@@ -2481,13 +2497,20 @@ bot.on("text", async (ctx) => {
         return ctx.reply("Send a photo of the place, or type /skip:");
       }
       if (text.trim().toLowerCase() === "/skip") {
-        await saveStoreAddress({
-          address: addressDraft.address!,
-          description: addressDraft.description,
-          image_url: addressDraft.image_url,
-        });
-        addressDrafts.delete(chatId);
-        return ctx.reply("Store address saved ✅", sellerReplyKeyboard());
+        try {
+          await saveStoreAddress({
+            address: addressDraft.address!,
+            description: addressDraft.description,
+            image_url: addressDraft.image_url,
+          });
+          addressDrafts.delete(chatId);
+          return ctx.reply("Store address saved ✅", sellerReplyKeyboard());
+        } catch (err) {
+          console.error("Failed to save store address:", err);
+          return ctx.reply(
+            "Could not save the address. Please check that the store_addresses table migration has been run, then try again.",
+          );
+        }
       }
       return ctx.reply("Please send the place photo or type /skip.");
     }
