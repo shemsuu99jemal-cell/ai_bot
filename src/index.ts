@@ -24,10 +24,19 @@ import {
   createPaymentMethod,
   updatePaymentMethod,
   deletePaymentMethod,
+  getStoreAddress,
+  saveStoreAddress,
+  deleteStoreAddress,
 } from "./db";
 import { loadSession, saveSession } from "./db";
 import { runEscalationCycle, startEscalationJob } from "./cron";
-import type { Session, OrderStatus, Product, PaymentMethod } from "./types";
+import type {
+  Session,
+  OrderStatus,
+  Product,
+  PaymentMethod,
+  StoreAddress,
+} from "./types";
 
 const REQUIRED_ENV = [
   "BOT_TOKEN",
@@ -123,6 +132,14 @@ type PaymentDraft = {
   account_name?: string | null;
 };
 const paymentDrafts = new Map<number, PaymentDraft>();
+type AddressDraft = {
+  mode: "create" | "edit";
+  step: "address" | "description" | "image";
+  address?: string;
+  description?: string | null;
+  image_url?: string | null;
+};
+const addressDrafts = new Map<number, AddressDraft>();
 const PRODUCTS_PAGE_SIZE = 8;
 
 function compactProductToken(value: string): string {
@@ -145,7 +162,7 @@ function sellerReplyKeyboard(): any {
     ["🏠 Start", "📦 Products"],
     ["🧾 Orders", "💳 Payments"],
     ["➕ Add Product", "📘 Help"],
-    ["🔄 Refresh", "📋 Menu"],
+    ["📍 Address", "📋 Menu"],
   ])
     .resize()
     .oneTime(false);
@@ -443,6 +460,71 @@ async function showPaymentMethods(ctx: any): Promise<void> {
   );
 }
 
+async function showStoreAddress(ctx: any, session?: Session): Promise<void> {
+  const address = await getStoreAddress();
+  if (!address) {
+    if (session) {
+      return ctx.reply(
+        t(
+          session,
+          "The store address has not been added yet.",
+          "የሱቁ አድራሻ እስካሁን አልተጨመረም።",
+        ),
+        mainMenuKeyboard(session),
+      );
+    }
+    return ctx.reply(
+      "No store address configured.",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("➕ Add Address", "address_add")],
+        [Markup.button.callback("⬅️ Dashboard", "seller_dashboard")],
+      ]),
+    );
+  }
+  const caption = [
+    "📍 STORE LOCATION",
+    "",
+    `📌 ${address.address}`,
+    address.description ? `📝 ${address.description}` : "",
+    "",
+    "We look forward to seeing you!",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (address.image_url) {
+    await ctx.replyWithPhoto(address.image_url, { caption });
+  } else {
+    await ctx.reply(caption);
+  }
+  if (!session) {
+    await ctx.reply(
+      "Manage store location",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("✏️ Edit Address", "address_edit")],
+        [Markup.button.callback("🗑 Remove Address", "address_delete")],
+      ]),
+    );
+  }
+}
+
+async function beginAddressDraft(ctx: any): Promise<void> {
+  addressDrafts.set(ctx.chat.id, { mode: "create", step: "address" });
+  await ctx.reply("Send the store address:", sellerReplyKeyboard());
+}
+
+async function beginAddressEdit(ctx: any): Promise<void> {
+  addressDrafts.delete(ctx.chat.id);
+  await ctx.reply(
+    "What do you want to update?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("📍 Address", "address_field_address")],
+      [Markup.button.callback("📝 Description", "address_field_description")],
+      [Markup.button.callback("🖼 Place Image", "address_field_image")],
+      [Markup.button.callback("⬅️ Cancel", "seller_address")],
+    ]),
+  );
+}
+
 function paymentMethodText(method: PaymentMethod): string {
   return `${method.name}\nAccount: ${method.account_number}\nName: ${method.account_name || "—"}\nStatus: ${method.is_active ? "Active" : "Inactive"}`;
 }
@@ -556,6 +638,8 @@ async function handleSellerKeyboardText(
     orders: () => showSellerOrders(ctx),
     payments: () => showPaymentMethods(ctx),
     help: () => showSellerHelp(ctx),
+    address: () => showStoreAddress(ctx),
+    "add address": () => beginAddressDraft(ctx),
     "add product": async () => {
       adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
       await ctx.reply(
@@ -563,7 +647,6 @@ async function handleSellerKeyboardText(
         sellerReplyKeyboard(),
       );
     },
-    refresh: () => showSellerDashboard(ctx),
   };
 
   const handler = actions[value];
@@ -807,7 +890,7 @@ function mainMenuKeyboard(session: Session): any {
     [t(session, "🛍️ Browse", "🛍️ ካታሎግ"), t(session, "🛒 My Cart", "🛒 ጋሪዬ")],
     [
       t(session, "📦 My Orders", "📦 ትዕዛዜቼ"),
-      t(session, "💬 Ask Seller", "💬 ሻጭ ይጠይቁ"),
+      t(session, "📍 Store Address", "📍 የሱቅ አድራሻ"),
     ],
     [t(session, "🏠 Start", "🏠 መነሻ"), t(session, "🌐 Language", "🌐 ቋንቋ")],
   ])
@@ -861,12 +944,7 @@ async function showCartText(ctx: any, session: Session): Promise<void> {
   await ctx.reply(
     `${lines.join("\n")}\n\n${t(session, "Total", "ጠቅላላ")}: ${total} ETB`,
     Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          t(session, "💳 Pay", "💳 ይክፈሉ"),
-          "do_checkout",
-        ),
-      ],
+      [Markup.button.callback(t(session, "💳 Pay", "💳 ይክፈሉ"), "do_checkout")],
       [
         Markup.button.callback(
           t(session, "🗑️ Clear Cart", "🗑️ ጋሪ ያፅዱ"),
@@ -1047,6 +1125,12 @@ async function handleQuickAction(
     "seller",
     "ሻጭ",
   ];
+  const addressLabels = [
+    "store address",
+    "📍 store address",
+    "📍 የሱቅ አድራሻ",
+    "የሱቅ አድራሻ",
+  ];
   const languageLabels = [
     "language",
     "change language",
@@ -1099,6 +1183,10 @@ async function handleQuickAction(
   }
   if (orderLabels.includes(value)) {
     await showCustomerOrders(ctx, session);
+    return true;
+  }
+  if (addressLabels.includes(value)) {
+    await showStoreAddress(ctx, session);
     return true;
   }
   if (sellerLabels.includes(value)) {
@@ -1202,6 +1290,17 @@ async function uploadProductImage(
     .publicUrl;
 }
 
+function storagePathFromPublicUrl(
+  url: string | null | undefined,
+): string | null {
+  if (!url) return null;
+  const marker = "/storage/v1/object/public/product-images/";
+  const index = url.indexOf(marker);
+  return index >= 0
+    ? decodeURIComponent(url.slice(index + marker.length))
+    : null;
+}
+
 async function showCategoryMenu(ctx: any, session: Session): Promise<void> {
   const categories = await getCategories();
   if (categories.length === 0) {
@@ -1267,12 +1366,7 @@ bot.command("cart", async (ctx) => {
           "back_categories",
         ),
       ],
-      [
-        Markup.button.callback(
-          t(session, "💳 Pay", "💳 ይክፈሉ"),
-          "do_checkout",
-        ),
-      ],
+      [Markup.button.callback(t(session, "💳 Pay", "💳 ይክፈሉ"), "do_checkout")],
     ]),
   );
 });
@@ -1672,20 +1766,11 @@ bot.action(/add_selected_([^_]+)_(\d+)(?:_(\d+))?/, async (ctx) => {
         "back_categories",
       ),
     ],
-    [
-      Markup.button.callback(
-        t(session, "💳 Pay", "💳 ይክፈሉ"),
-        "do_checkout",
-      ),
-    ],
+    [Markup.button.callback(t(session, "💳 Pay", "💳 ይክፈሉ"), "do_checkout")],
   ];
 
   await ctx.reply(
-    t(
-      session,
-      `Added ${product.name} ✅`,
-      `${product.name} ታክሏል ✅`,
-    ),
+    t(session, `Added ${product.name} ✅`, `${product.name} ታክሏል ✅`),
     Markup.inlineKeyboard(buttons),
   );
 });
@@ -1702,12 +1787,7 @@ bot.action("view_cart", async (ctx) => {
   );
   const total = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const buttons: any[] = [
-    [
-      Markup.button.callback(
-        t(session, "💳 Pay", "💳 ይክፈሉ"),
-        "do_checkout",
-      ),
-    ],
+    [Markup.button.callback(t(session, "💳 Pay", "💳 ይክፈሉ"), "do_checkout")],
   ];
   buttons.push([
     Markup.button.callback(
@@ -1789,12 +1869,7 @@ bot.action(/remove_cart_(.+)/, async (ctx) => {
           "back_categories",
         ),
       ],
-      [
-        Markup.button.callback(
-          t(session, "💳 Pay", "💳 ይክፈሉ"),
-          "do_checkout",
-        ),
-      ],
+      [Markup.button.callback(t(session, "💳 Pay", "💳 ይክፈሉ"), "do_checkout")],
     ]),
   );
 });
@@ -1845,6 +1920,61 @@ bot.action("seller_payments", async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
   await showPaymentMethods(ctx);
+});
+
+bot.action("seller_address", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await showStoreAddress(ctx);
+});
+
+bot.action("address_edit", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await beginAddressEdit(ctx);
+});
+
+bot.action("address_add", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  await beginAddressDraft(ctx);
+});
+
+bot.action(/^address_field_(address|description|image)$/, async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const existing = await getStoreAddress();
+  if (!existing) return beginAddressDraft(ctx);
+
+  const step = ctx.match[1] as AddressDraft["step"];
+  addressDrafts.set(ctx.chat!.id, {
+    mode: "edit",
+    step,
+    address: existing.address,
+    description: existing.description,
+    image_url: existing.image_url,
+  });
+  const prompts = {
+    address: "Send the new store address:",
+    description: "Send the new description, or /skip to clear it:",
+    image: "Send the new place photo:",
+  };
+  await ctx.reply(prompts[step], sellerReplyKeyboard());
+});
+
+bot.action("address_delete", async (ctx) => {
+  if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
+  await ctx.answerCbQuery();
+  const address = await getStoreAddress();
+  await deleteStoreAddress();
+  const imagePath = storagePathFromPublicUrl(address?.image_url);
+  if (imagePath) {
+    const { error } = await supabase.storage
+      .from("product-images")
+      .remove([imagePath]);
+    if (error) console.warn("Could not remove deleted address image:", error);
+  }
+  await ctx.reply("Store address removed ✅", sellerReplyKeyboard());
 });
 
 bot.action("payment_add", async (ctx) => {
@@ -2294,6 +2424,60 @@ bot.on("text", async (ctx) => {
     const sellerHandled = await handleSellerKeyboardText(ctx, text);
     if (sellerHandled) return;
 
+    const addressDraft = addressDrafts.get(chatId);
+    if (addressDraft) {
+      if (addressDraft.mode === "edit") {
+        if (addressDraft.step === "address") {
+          if (!text.trim()) return ctx.reply("Address is required.");
+          await saveStoreAddress({
+            address: text.trim(),
+            description: addressDraft.description,
+            image_url: addressDraft.image_url,
+          });
+          addressDrafts.delete(chatId);
+          return ctx.reply("Store address updated ✅", sellerReplyKeyboard());
+        }
+        if (addressDraft.step === "description") {
+          await saveStoreAddress({
+            address: addressDraft.address!,
+            description:
+              text.trim().toLowerCase() === "/skip" ? null : text.trim(),
+            image_url: addressDraft.image_url,
+          });
+          addressDrafts.delete(chatId);
+          return ctx.reply(
+            "Address description updated ✅",
+            sellerReplyKeyboard(),
+          );
+        }
+        return ctx.reply("Please send the new place photo.");
+      }
+      if (addressDraft.step === "address") {
+        if (!text.trim()) return ctx.reply("Address is required.");
+        addressDraft.address = text.trim();
+        addressDraft.step = "description";
+        addressDrafts.set(chatId, addressDraft);
+        return ctx.reply("Send a short description or /skip:");
+      }
+      if (addressDraft.step === "description") {
+        addressDraft.description =
+          text.trim().toLowerCase() === "/skip" ? null : text.trim();
+        addressDraft.step = "image";
+        addressDrafts.set(chatId, addressDraft);
+        return ctx.reply("Send a photo of the place, or type /skip:");
+      }
+      if (text.trim().toLowerCase() === "/skip") {
+        await saveStoreAddress({
+          address: addressDraft.address!,
+          description: addressDraft.description,
+          image_url: addressDraft.image_url,
+        });
+        addressDrafts.delete(chatId);
+        return ctx.reply("Store address saved ✅", sellerReplyKeyboard());
+      }
+      return ctx.reply("Please send the place photo or type /skip.");
+    }
+
     const paymentDraft = paymentDrafts.get(chatId);
     if (paymentDraft) {
       await handlePaymentDraftText(ctx, paymentDraft, text);
@@ -2554,6 +2738,43 @@ bot.on("photo", async (ctx) => {
   }
 
   const adminDraft = adminDrafts.get(chatId);
+  const addressDraft = addressDrafts.get(chatId);
+  if (isSeller(ctx.from.id) && addressDraft?.step === "image") {
+    try {
+      const photos = ctx.message.photo;
+      const fileId = photos[photos.length - 1].file_id;
+      const previousAddress = await getStoreAddress();
+      addressDraft.image_url = await uploadProductImage(
+        ctx,
+        fileId,
+        `address-${chatId}-${Date.now()}.jpg`,
+      );
+      await saveStoreAddress({
+        address: addressDraft.address!,
+        description: addressDraft.description,
+        image_url: addressDraft.image_url,
+      });
+      const previousImagePath = storagePathFromPublicUrl(
+        previousAddress?.image_url,
+      );
+      if (previousImagePath) {
+        const { error: removeError } = await supabase.storage
+          .from("product-images")
+          .remove([previousImagePath]);
+        if (removeError)
+          console.warn("Could not remove old address image:", removeError);
+      }
+      addressDrafts.delete(chatId);
+      await ctx.reply(
+        "Store address and photo saved ✅",
+        sellerReplyKeyboard(),
+      );
+    } catch (err) {
+      console.error("Failed to save store address photo:", err);
+      await ctx.reply("Could not save that address photo.");
+    }
+    return;
+  }
   if (isSeller(ctx.from.id) && adminDraft?.step === "image") {
     try {
       const photos = ctx.message.photo;

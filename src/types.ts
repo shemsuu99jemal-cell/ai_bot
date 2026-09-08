@@ -73,6 +73,14 @@ export interface PaymentMethod {
   created_at?: string;
 }
 
+export interface StoreAddress {
+  id: string;
+  address: string;
+  description?: string | null;
+  image_url?: string | null;
+  updated_at?: string;
+}
+
 export type AiResult =
   | { action: "reply"; text: string }
   | { action: "checkout" }

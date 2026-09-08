@@ -6,6 +6,7 @@ import type {
   Session,
   OrderStatus,
   PaymentMethod,
+  StoreAddress,
 } from "./types";
 
 export const supabase = createClient(
@@ -296,6 +297,38 @@ export async function deletePaymentMethod(id: string): Promise<void> {
     .from("payment_methods")
     .update({ is_active: false })
     .eq("id", id);
+  if (error) throw error;
+}
+
+export async function getStoreAddress(): Promise<StoreAddress | null> {
+  const { data, error } = await supabase
+    .from("store_addresses")
+    .select("*")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return (data || null) as StoreAddress | null;
+}
+
+export async function saveStoreAddress(data: {
+  address: string;
+  description?: string | null;
+  image_url?: string | null;
+}): Promise<StoreAddress> {
+  const existing = await getStoreAddress();
+  const query = existing
+    ? supabase.from("store_addresses").update(data).eq("id", existing.id)
+    : supabase.from("store_addresses").insert(data);
+  const { data: saved, error } = await query.select().single();
+  if (error) throw error;
+  return saved as StoreAddress;
+}
+
+export async function deleteStoreAddress(): Promise<void> {
+  const { error } = await supabase
+    .from("store_addresses")
+    .delete()
+    .neq("id", "");
   if (error) throw error;
 }
 
