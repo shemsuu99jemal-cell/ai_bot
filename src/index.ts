@@ -803,6 +803,19 @@ async function sendMainMenu(
   );
 }
 
+async function sendWelcomeAndBrowse(ctx: any, session: Session): Promise<void> {
+  await sendMainMenu(
+    ctx,
+    session,
+    t(
+      session,
+      "Welcome to Afrosupplements 😊 What can I help you with today?",
+      "እንኳን ወደ Afrosupplements በደህና መጡ 😊 ዛሬ እንዴት ልርዳዎት?",
+    ),
+  );
+  await showCategoryMenu(ctx, session);
+}
+
 async function showCartText(ctx: any, session: Session): Promise<void> {
   if (session.cart.length === 0) {
     return ctx.reply(
@@ -1076,7 +1089,7 @@ async function handleQuickAction(
     return true;
   }
   if (homeLabels.includes(value)) {
-    await sendMainMenu(ctx, session, t(session, "Main menu", "ዋና ሜኑ"));
+    await sendWelcomeAndBrowse(ctx, session);
     return true;
   }
 
@@ -1202,7 +1215,7 @@ bot.command("start", async (ctx) => {
   }
 
   const session = await getSession(ctx.chat.id);
-  await sendMainMenu(ctx, session, t(session, "Main menu", "ዋና ሜኑ"));
+  await sendWelcomeAndBrowse(ctx, session);
 });
 
 bot.command("cart", async (ctx) => {
@@ -2113,22 +2126,6 @@ async function finalizeOrder(
 
   await bot.telegram.sendMessage(chatId, payMsg, Markup.removeKeyboard());
 }
-
-// ---- /start ----
-bot.start(async (ctx) => {
-  if (isSeller(ctx.from.id)) {
-    await showSellerDashboard(ctx);
-    return;
-  }
-
-  await ctx.reply(
-    "Welcome! Please choose your language / እባክዎ ቋንቋ ይምረጡ:",
-    Markup.inlineKeyboard([
-      Markup.button.callback("English", "lang_en"),
-      Markup.button.callback("አማርኛ", "lang_am"),
-    ]),
-  );
-});
 
 bot.action(/lang_(en|am)/, async (ctx) => {
   const language = ctx.match[1] as "en" | "am";
