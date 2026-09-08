@@ -508,11 +508,15 @@ async function showStoreAddress(ctx: any, session?: Session): Promise<void> {
 }
 
 async function beginAddressDraft(ctx: any): Promise<void> {
+  adminDrafts.delete(ctx.chat.id);
+  paymentDrafts.delete(ctx.chat.id);
   addressDrafts.set(ctx.chat.id, { mode: "create", step: "address" });
   await ctx.reply("Send the store address:", sellerReplyKeyboard());
 }
 
 async function beginAddressEdit(ctx: any): Promise<void> {
+  adminDrafts.delete(ctx.chat.id);
+  paymentDrafts.delete(ctx.chat.id);
   addressDrafts.delete(ctx.chat.id);
   await ctx.reply(
     "What do you want to update?",
@@ -641,6 +645,8 @@ async function handleSellerKeyboardText(
     address: () => showStoreAddress(ctx),
     "add address": () => beginAddressDraft(ctx),
     "add product": async () => {
+      paymentDrafts.delete(ctx.chat.id);
+      addressDrafts.delete(ctx.chat.id);
       adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
       await ctx.reply(
         "Let's add a new product. What's the product name?",
@@ -1415,6 +1421,8 @@ bot.action("seller_help_flow", async (ctx) => {
 
 bot.command("addproduct", async (ctx) => {
   if (!isSeller(ctx.from.id)) return;
+  paymentDrafts.delete(ctx.chat.id);
+  addressDrafts.delete(ctx.chat.id);
   adminDrafts.set(ctx.chat.id, { mode: "create", step: "name" });
   await ctx.reply("Let's add a new product. What's the product name?");
 });
@@ -1980,6 +1988,8 @@ bot.action("address_delete", async (ctx) => {
 bot.action("payment_add", async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
+  adminDrafts.delete(ctx.chat!.id);
+  addressDrafts.delete(ctx.chat!.id);
   paymentDrafts.set(ctx.chat!.id, { mode: "create", step: "name" });
   await ctx.reply("Payment name (for example Telebirr or CBE):");
 });
@@ -1987,6 +1997,8 @@ bot.action("payment_add", async (ctx) => {
 bot.action(/payment_edit_(.+)/, async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
+  adminDrafts.delete(ctx.chat!.id);
+  addressDrafts.delete(ctx.chat!.id);
   const method = (await listPaymentMethods(false)).find(
     (item) => item.id === ctx.match[1],
   );
@@ -2013,6 +2025,8 @@ bot.action(/payment_delete_(.+)/, async (ctx) => {
 bot.action("admin_add", async (ctx) => {
   if (!isSeller(ctx.from.id)) return ctx.answerCbQuery("Not authorized");
   await ctx.answerCbQuery();
+  paymentDrafts.delete(ctx.chat!.id);
+  addressDrafts.delete(ctx.chat!.id);
   adminDrafts.set(ctx.chat!.id, { mode: "create", step: "name" });
   await ctx.reply("Let's add a new product. What's the product name?");
 });
